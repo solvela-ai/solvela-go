@@ -1,1 +1,188 @@
 package rustyclaw
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// Transport handles HTTP communication with the RustyClaw gateway.
+type Transport struct {
+	baseURL string
+	timeout time.Duration
+	client  *http.Client
+}
+
+// NewTransport creates a new Transport with the given base URL and timeout.
+func NewTransport(baseURL string, timeout time.Duration) *Transport {
+	return &Transport{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		timeout: timeout,
+		client:  &http.Client{Timeout: timeout},
+	}
+}
+
+// SendChatResult is either a ChatResponse or PaymentRequired.
+type SendChatResult struct {
+	Response        *ChatResponse
+	PaymentRequired *PaymentRequired
+}
+
+// SendChat sends a non-streaming chat request.
+func (t *Transport) SendChat(ctx context.Context, request *ChatRequest, paymentSignature string, extraHeaders map[string]string) (*SendChatResult, error) {
+	request.Stream = false
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := t.baseURL + "/v1/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if paymentSignature != "" {
+		req.Header.Set("Payment-Signature", paymentSignature)
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, &TimeoutError{TimeoutSecs: t.timeout.Seconds()}
+		}
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		var chatResp ChatResponse
+		if err := json.Unmarshal(data, &chatResp); err != nil {
+			return nil, fmt.Errorf("parse error: %w", err)
+		}
+		return &SendChatResult{Response: &chatResp}, nil
+	case 402:
+		var pr PaymentRequired
+		if err := json.Unmarshal(data, &pr); err != nil {
+			return nil, fmt.Errorf("parse 402 error: %w", err)
+		}
+		return &SendChatResult{PaymentRequired: &pr}, nil
+	default:
+		var errData map[string]interface{}
+		json.Unmarshal(data, &errData)
+		msg := string(data)
+		if e, ok := errData["error"]; ok {
+			msg = fmt.Sprintf("%v", e)
+		}
+		return nil, &GatewayError{Status: resp.StatusCode, Message: msg}
+	}
+}
+
+// ChatChunkOrError holds either a streaming chunk or an error.
+type ChatChunkOrError struct {
+	Chunk *ChatChunk
+	Err   error
+}
+
+// SendChatStream sends a streaming chat request and returns a channel of chunks.
+func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, paymentSignature string, extraHeaders map[string]string) (<-chan ChatChunkOrError, error) {
+	request.Stream = true
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := t.baseURL + "/v1/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if paymentSignature != "" {
+		req.Header.Set("Payment-Signature", paymentSignature)
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == 402 {
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		var pr PaymentRequired
+		json.Unmarshal(data, &pr)
+		return nil, &PaymentRequiredError{PaymentRequired: pr}
+	}
+	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
+	}
+
+	ch := make(chan ChatChunkOrError)
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				dataStr := strings.TrimPrefix(line, "data: ")
+				dataStr = strings.TrimSpace(dataStr)
+				if dataStr == "[DONE]" {
+					return
+				}
+				var chunk ChatChunk
+				if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+					ch <- ChatChunkOrError{Err: err}
+					return
+				}
+				ch <- ChatChunkOrError{Chunk: &chunk}
+			}
+		}
+	}()
+	return ch, nil
+}
+
+// FetchModels retrieves available models from the gateway.
+func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
+	url := t.baseURL + "/v1/models"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, &GatewayError{Status: resp.StatusCode}
+	}
+	var result struct {
+		Data []ModelInfo `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("parse models: %w", err)
+	}
+	return result.Data, nil
+}

@@ -183,7 +183,7 @@ type ModelInfo struct {
 	InputCostPerMillion      float64 `json:"input_cost_per_million"`
 	OutputCostPerMillion     float64 `json:"output_cost_per_million"`
 	ContextWindow            int     `json:"context_window"`
-	SupportsStreaming         bool    `json:"supports_streaming"`
+	SupportsStreaming        bool    `json:"supports_streaming"`
 	SupportsTools            bool    `json:"supports_tools"`
 	SupportsVision           bool    `json:"supports_vision"`
 	Reasoning                bool    `json:"reasoning"`

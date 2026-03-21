@@ -199,7 +199,7 @@ func TestModelInfoRoundtrip(t *testing.T) {
 		InputCostPerMillion:      30.0,
 		OutputCostPerMillion:     60.0,
 		ContextWindow:            128000,
-		SupportsStreaming:         true,
+		SupportsStreaming:        true,
 		SupportsTools:            true,
 		SupportsVision:           true,
 		Reasoning:                false,
