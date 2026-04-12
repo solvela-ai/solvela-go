@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	rustyclaw "github.com/RustyClawRouter/rustyclaw-go"
+	rustyclaw "github.com/solvela/sdk-go"
 )
 
 func TestLiveHealth(t *testing.T) {

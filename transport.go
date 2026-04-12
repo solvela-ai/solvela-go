@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Transport handles HTTP communication with the RustyClaw gateway.
+// Transport handles HTTP communication with the Solvela gateway.
 type Transport struct {
 	baseURL string
 	timeout time.Duration

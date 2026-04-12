@@ -1,13 +1,13 @@
 # rustyclaw-go
 
-Go SDK for [RustyClawRouter](https://github.com/RustyClawRouter/RustyClawRouter) — a Solana-native AI agent payment gateway.
+Go SDK for [Solvela](https://github.com/Solvela/Solvela) — a Solana-native AI agent payment gateway.
 
 AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
 ## Install
 
 ```bash
-go get github.com/RustyClawRouter/rustyclaw-go
+go get github.com/Solvela/rustyclaw-go
 ```
 
 ## Quick Start
@@ -20,7 +20,7 @@ import (
     "fmt"
     "log"
 
-    rcr "github.com/RustyClawRouter/rustyclaw-go"
+    rcr "github.com/Solvela/rustyclaw-go"
 )
 
 func main() {

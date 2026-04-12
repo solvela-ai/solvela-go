@@ -7,8 +7,8 @@ import (
 	"fmt"
 )
 
-// RustyClawClient is the main client for interacting with the RustyClaw gateway.
-type RustyClawClient struct {
+// SolvelaClient is the main client for interacting with the Solvela gateway.
+type SolvelaClient struct {
 	config       ClientConfig
 	wallet       *Wallet
 	signer       Signer
@@ -18,14 +18,14 @@ type RustyClawClient struct {
 	lastBalance  *float64
 }
 
-// NewClient creates a new RustyClawClient with functional options.
-func NewClient(wallet *Wallet, signer Signer, opts ...Option) *RustyClawClient {
+// NewClient creates a new SolvelaClient with functional options.
+func NewClient(wallet *Wallet, signer Signer, opts ...Option) *SolvelaClient {
 	cfg := DefaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	c := &RustyClawClient{
+	c := &SolvelaClient{
 		config:    cfg,
 		wallet:    wallet,
 		signer:    signer,
@@ -42,7 +42,7 @@ func NewClient(wallet *Wallet, signer Signer, opts ...Option) *RustyClawClient {
 
 // Chat sends a non-streaming chat request with automatic payment, caching,
 // session tracking, and quality checking.
-func (c *RustyClawClient) Chat(ctx context.Context, request *ChatRequest) (*ChatResponse, error) {
+func (c *SolvelaClient) Chat(ctx context.Context, request *ChatRequest) (*ChatResponse, error) {
 	model := request.Model
 
 	// Step 1: Balance guard
@@ -121,7 +121,7 @@ func (c *RustyClawClient) Chat(ctx context.Context, request *ChatRequest) (*Chat
 }
 
 // ChatStream sends a streaming chat request.
-func (c *RustyClawClient) ChatStream(ctx context.Context, request *ChatRequest) (<-chan ChatChunkOrError, error) {
+func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<-chan ChatChunkOrError, error) {
 	model := request.Model
 
 	// Step 1: Balance guard
@@ -168,21 +168,21 @@ func (c *RustyClawClient) ChatStream(ctx context.Context, request *ChatRequest) 
 }
 
 // Models retrieves available models from the gateway.
-func (c *RustyClawClient) Models(ctx context.Context) ([]ModelInfo, error) {
+func (c *SolvelaClient) Models(ctx context.Context) ([]ModelInfo, error) {
 	return c.transport.FetchModels(ctx)
 }
 
 // LastKnownBalance returns the most recently known wallet balance, or nil.
-func (c *RustyClawClient) LastKnownBalance() *float64 {
+func (c *SolvelaClient) LastKnownBalance() *float64 {
 	return c.lastBalance
 }
 
 // String returns a debug-safe representation with redacted secrets.
-func (c *RustyClawClient) String() string {
-	return fmt.Sprintf("RustyClawClient(gateway=%s, wallet=REDACTED)", c.config.GatewayURL)
+func (c *SolvelaClient) String() string {
+	return fmt.Sprintf("SolvelaClient(gateway=%s, wallet=REDACTED)", c.config.GatewayURL)
 }
 
-func (c *RustyClawClient) sendWithPayment(ctx context.Context, request *ChatRequest, extraHeaders map[string]string) (*ChatResponse, error) {
+func (c *SolvelaClient) sendWithPayment(ctx context.Context, request *ChatRequest, extraHeaders map[string]string) (*ChatResponse, error) {
 	result, err := c.transport.SendChat(ctx, request, "", extraHeaders)
 	if err != nil {
 		return nil, err
@@ -224,7 +224,7 @@ func (c *RustyClawClient) sendWithPayment(ctx context.Context, request *ChatRequ
 	return result.Response, nil
 }
 
-func (c *RustyClawClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept {
+func (c *SolvelaClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept {
 	for i := range pr.Accepts {
 		if pr.Accepts[i].Scheme == "exact" && pr.Accepts[i].Network == SolanaNetwork {
 			return &pr.Accepts[i]
@@ -238,7 +238,7 @@ func (c *RustyClawClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAcce
 	return nil
 }
 
-func (c *RustyClawClient) validatePayment(accepted *PaymentAccept) error {
+func (c *SolvelaClient) validatePayment(accepted *PaymentAccept) error {
 	if c.config.ExpectedRecipient != "" && accepted.PayTo != c.config.ExpectedRecipient {
 		return &RecipientMismatchError{Expected: c.config.ExpectedRecipient, Actual: accepted.PayTo}
 	}

@@ -20,11 +20,11 @@ go test -v -run TestCacheKey       # Run tests matching pattern
 
 ## Architecture
 
-Single-package Go SDK (`package rustyclaw`) — no sub-packages. Module: `github.com/RustyClawRouter/rustyclaw-go`.
+Single-package Go SDK (`package rustyclaw`) — no sub-packages. Module: `github.com/Solvela/rustyclaw-go`.
 
 | File | Purpose |
 |------|---------|
-| `client.go` | `RustyClawClient` — main entry point. `Chat()`, `ChatStream()`, `Models()`. Orchestrates payment, caching, sessions, quality checking. |
+| `client.go` | `SolvelaClient` — main entry point. `Chat()`, `ChatStream()`, `Models()`. Orchestrates payment, caching, sessions, quality checking. |
 | `transport.go` | `Transport` — HTTP layer. `SendChat()`, `SendChatStream()` (SSE), `FetchModels()`. Handles 200/402/error responses. |
 | `wallet.go` | `Wallet` — ed25519 keypair. `CreateWallet()`, `WalletFromKeypairB58()`, `WalletFromEnv()`. Uses `mr-tron/base58`. |
 | `signer.go` | `Signer` interface + `KeypairSigner` stub. Pluggable payment transaction signing. |
@@ -55,7 +55,7 @@ Single-package Go SDK (`package rustyclaw`) — no sub-packages. Module: `github
 - **No `.unwrap()` equivalent**: all errors returned, never panicked
 - **OpenAI-compatible**: types mirror the OpenAI chat completions API
 - **x402 protocol**: payment negotiation via HTTP 402 with `Payment-Signature` header
-- **Secrets**: `Wallet.String()` and `RustyClawClient.String()` always redact private keys
+- **Secrets**: `Wallet.String()` and `SolvelaClient.String()` always redact private keys
 
 ## CI
 
