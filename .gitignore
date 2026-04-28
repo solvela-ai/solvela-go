@@ -1,5 +1,7 @@
-/vendor/
+!.env.example
 *.exe
+*.out
 *.test
 .env*
-!.env.example
+/vendor/
+coverage.out
