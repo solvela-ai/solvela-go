@@ -1,6 +1,6 @@
 //go:build live
 
-package rustyclaw_test
+package solvela_test
 
 import (
 	"context"
@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	rustyclaw "github.com/solvela/sdk-go"
+	solvela "github.com/solvela-ai/solvela-go"
 )
 
 func TestLiveHealth(t *testing.T) {
-	gatewayURL := os.Getenv("RCR_GATEWAY_URL")
+	gatewayURL := os.Getenv("SOLVELA_GATEWAY_URL")
 	if gatewayURL == "" {
 		gatewayURL = "http://localhost:8402"
 	}
 
-	transport := rustyclaw.NewTransport(gatewayURL, 10*time.Second)
+	transport := solvela.NewTransport(gatewayURL, 10*time.Second)
 	models, err := transport.FetchModels(context.Background())
 	if err != nil {
 		t.Fatalf("fetch models: %v", err)
@@ -29,25 +29,25 @@ func TestLiveHealth(t *testing.T) {
 }
 
 func TestLiveChat402(t *testing.T) {
-	gatewayURL := os.Getenv("RCR_GATEWAY_URL")
+	gatewayURL := os.Getenv("SOLVELA_GATEWAY_URL")
 	if gatewayURL == "" {
 		gatewayURL = "http://localhost:8402"
 	}
 
-	wallet, _, err := rustyclaw.CreateWallet()
+	wallet, _, err := solvela.CreateWallet()
 	if err != nil {
 		t.Fatalf("create wallet: %v", err)
 	}
 
-	client := rustyclaw.NewClient(wallet, nil,
-		rustyclaw.WithGatewayURL(gatewayURL),
-		rustyclaw.WithTimeout(30*time.Second),
+	client := solvela.NewClient(wallet, nil,
+		solvela.WithGatewayURL(gatewayURL),
+		solvela.WithTimeout(30*time.Second),
 	)
 
-	_, err = client.Chat(context.Background(), &rustyclaw.ChatRequest{
+	_, err = client.Chat(context.Background(), &solvela.ChatRequest{
 		Model: "gpt-4o-mini",
-		Messages: []rustyclaw.ChatMessage{
-			{Role: rustyclaw.RoleUser, Content: "Say hello in one word."},
+		Messages: []solvela.ChatMessage{
+			{Role: solvela.RoleUser, Content: "Say hello in one word."},
 		},
 	})
 
@@ -55,7 +55,7 @@ func TestLiveChat402(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error (402 payment required)")
 	}
-	_, ok := err.(*rustyclaw.PaymentRequiredError)
+	_, ok := err.(*solvela.PaymentRequiredError)
 	if !ok {
 		t.Logf("got error type %T: %v", err, err)
 	}

@@ -1,4 +1,4 @@
-package rustyclaw
+package solvela
 
 import (
 	"crypto/sha256"

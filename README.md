@@ -1,13 +1,13 @@
-# rustyclaw-go
+# solvela-go
 
-Go SDK for [Solvela](https://github.com/Solvela/Solvela) — a Solana-native AI agent payment gateway.
+Go SDK for [Solvela](https://solvela.ai) — a Solana-native AI agent payment gateway.
 
 AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
 ## Install
 
 ```bash
-go get github.com/Solvela/rustyclaw-go
+go get github.com/solvela-ai/solvela-go
 ```
 
 ## Quick Start
@@ -16,36 +16,36 @@ go get github.com/Solvela/rustyclaw-go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
+	"context"
+	"fmt"
+	"log"
 
-    rcr "github.com/Solvela/rustyclaw-go"
+	solvela "github.com/solvela-ai/solvela-go"
 )
 
 func main() {
-    wallet, _, err := rcr.CreateWallet()
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println("Wallet:", wallet.Address())
+	wallet, _, err := solvela.CreateWallet()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Wallet:", wallet.Address())
 
-    client := rcr.NewClient(wallet, nil,
-        rcr.WithGatewayURL("http://localhost:8402"),
-        rcr.WithCache(true),
-        rcr.WithSessions(true),
-    )
+	client := solvela.NewClient(wallet, nil,
+		solvela.WithGatewayURL("https://api.solvela.ai"),
+		solvela.WithCache(true),
+		solvela.WithSessions(true),
+	)
 
-    resp, err := client.Chat(context.Background(), &rcr.ChatRequest{
-        Model: "gpt-4o-mini",
-        Messages: []rcr.ChatMessage{
-            {Role: rcr.RoleUser, Content: "Hello!"},
-        },
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(resp.Choices[0].Message.Content)
+	resp, err := client.Chat(context.Background(), &solvela.ChatRequest{
+		Model: "gpt-4o-mini",
+		Messages: []solvela.ChatMessage{
+			{Role: solvela.RoleUser, Content: "Hello!"},
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(resp.Choices[0].Message.Content)
 }
 ```
 
@@ -62,16 +62,16 @@ func main() {
 ## Configuration
 
 ```go
-client := rcr.NewClient(wallet, signer,
-    rcr.WithGatewayURL("https://gateway.example.com"),
-    rcr.WithTimeout(60 * time.Second),
-    rcr.WithCache(true),
-    rcr.WithSessions(true),
-    rcr.WithQualityCheck(true),
-    rcr.WithMaxQualityRetries(2),
-    rcr.WithExpectedRecipient("expected-wallet-address"),
-    rcr.WithMaxPaymentAmount(100000), // atomic USDC units
-    rcr.WithFreeFallbackModel("gpt-4o-mini"),
+client := solvela.NewClient(wallet, signer,
+	solvela.WithGatewayURL("https://api.solvela.ai"),
+	solvela.WithTimeout(60 * time.Second),
+	solvela.WithCache(true),
+	solvela.WithSessions(true),
+	solvela.WithQualityCheck(true),
+	solvela.WithMaxQualityRetries(2),
+	solvela.WithExpectedRecipient("expected-wallet-address"),
+	solvela.WithMaxPaymentAmount(100000), // atomic USDC units
+	solvela.WithFreeFallbackModel("gpt-4o-mini"),
 )
 ```
 

@@ -1,4 +1,4 @@
-package rustyclaw
+package solvela
 
 const (
 	X402Version        = 2

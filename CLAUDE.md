@@ -20,7 +20,7 @@ go test -v -run TestCacheKey       # Run tests matching pattern
 
 ## Architecture
 
-Single-package Go SDK (`package rustyclaw`) — no sub-packages. Module: `github.com/Solvela/rustyclaw-go`.
+Single-package Go SDK (`package solvela`) — no sub-packages. Module: `github.com/solvela-ai/solvela-go`.
 
 | File | Purpose |
 |------|---------|
