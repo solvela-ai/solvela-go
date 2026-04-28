@@ -98,7 +98,7 @@ func (c *SolvelaClient) Chat(ctx context.Context, request *ChatRequest) (*ChatRe
 				break
 			}
 			response, err = c.sendWithPayment(ctx, effectiveReq, map[string]string{
-				"X-RCR-Retry-Reason": "degraded",
+				"X-Solvela-Retry-Reason": "degraded",
 			})
 			if err != nil {
 				return nil, err
