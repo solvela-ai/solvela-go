@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// maxResponseBytes caps the response body size to 10 MB to prevent memory
+// exhaustion from a malicious or misbehaving gateway.
+const maxResponseBytes = 10 << 20 // 10 MB
+
 // Transport handles HTTP communication with the Solvela gateway.
 type Transport struct {
 	baseURL string
@@ -24,7 +28,14 @@ func NewTransport(baseURL string, timeout time.Duration) *Transport {
 	return &Transport{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		timeout: timeout,
-		client:  &http.Client{Timeout: timeout},
+		client: &http.Client{
+			Timeout: timeout,
+			// Refuse redirects entirely: following a redirect would forward the
+			// Payment-Signature header to an unintended destination.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -64,7 +75,7 @@ func (t *Transport) SendChat(ctx context.Context, request *ChatRequest, paymentS
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +138,14 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 
 	if resp.StatusCode == 402 {
 		defer resp.Body.Close()
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 		var pr PaymentRequired
 		json.Unmarshal(data, &pr)
 		return nil, &PaymentRequiredError{PaymentRequired: pr}
 	}
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
-		data, _ := io.ReadAll(resp.Body)
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
 	}
 
@@ -143,6 +154,9 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 		defer close(ch)
 		defer resp.Body.Close()
 		scanner := bufio.NewScanner(resp.Body)
+		// Default scanner token buffer is 64 KB, which can truncate large SSE
+		// chunks containing long completions. Allow up to 1 MB per line.
+		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "data: ") {
