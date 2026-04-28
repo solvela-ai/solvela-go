@@ -1,3 +1,5 @@
 /vendor/
 *.exe
 *.test
+.env*
+!.env.example
