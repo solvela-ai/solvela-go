@@ -3,5 +3,6 @@
 *.out
 *.test
 .env*
+.mcp.json
 /vendor/
 coverage.out

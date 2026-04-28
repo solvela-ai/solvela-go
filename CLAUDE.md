@@ -5,7 +5,7 @@ This file provides guidance to Claude Code when working with this repository.
 ## Build & Test Commands
 
 ```bash
-go test ./... -v -count=1          # Run all tests (101 tests, ~79% coverage)
+go test ./... -v -count=1          # Run all tests
 go test ./... -cover               # Run tests with coverage summary
 go test ./... -tags=live           # Run live tests (requires running gateway)
 go vet ./...                       # Static analysis
