@@ -22,9 +22,12 @@ func NewKeypairSigner(wallet *Wallet, rpcURL string) *KeypairSigner {
 	return &KeypairSigner{wallet: wallet, rpcURL: rpcURL}
 }
 
-// SignPayment creates a signed payment transaction.
-func (s *KeypairSigner) SignPayment(ctx context.Context, amountAtomic uint64, recipient string, resource Resource, accepted PaymentAccept) (*PaymentPayload, error) {
-	// Full SPL token signing requires github.com/gagliardetto/solana-go.
-	// For now, return a stub error indicating implementation needed.
-	return nil, &SignerError{Message: "full SPL token signing not yet implemented — needs github.com/gagliardetto/solana-go"}
+// SignPayment is not yet implemented in solvela-go.
+//
+// Use the Python SDK (solvela-python) or TypeScript SDK (solvela-ts) for
+// production payment signing, or implement a custom [Signer] using the
+// standard library's crypto/ed25519 package and a Solana JSON-RPC client
+// of your choice.
+func (s *KeypairSigner) SignPayment(_ context.Context, _ uint64, _ string, _ Resource, _ PaymentAccept) (*PaymentPayload, error) {
+	return nil, &SignerError{Message: "KeypairSigner.SignPayment is not yet implemented in solvela-go; use the Python or TS SDK, or implement a custom Signer"}
 }
