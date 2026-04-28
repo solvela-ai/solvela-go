@@ -2,7 +2,7 @@ package solvela
 
 import "time"
 
-// ClientConfig holds all configuration for a RustyClaw client.
+// ClientConfig holds all configuration for a Solvela client.
 type ClientConfig struct {
 	GatewayURL         string
 	RPCURL             string
