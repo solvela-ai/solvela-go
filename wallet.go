@@ -62,17 +62,39 @@ func (w *Wallet) PublicKey() ed25519.PublicKey {
 	return w.privateKey.Public().(ed25519.PublicKey)
 }
 
-// PrivateKey returns the ed25519 private key.
-func (w *Wallet) PrivateKey() ed25519.PrivateKey {
+// privateKeyBytes returns the raw ed25519 private key. It is unexported so the
+// secret material does not leak across the package boundary; callers that need
+// to sign should use [Wallet.Sign]. Persistence helpers within this package
+// (e.g. [Wallet.ToKeypairBytes]) use this internally.
+//
+// SECURITY: callers within the package MUST NOT log, print, or otherwise
+// expose the returned bytes.
+func (w *Wallet) privateKeyBytes() ed25519.PrivateKey {
 	return w.privateKey
 }
 
+// Sign signs the given message with the wallet's ed25519 private key and
+// returns the signature. Callers should prefer this over reaching for raw
+// key bytes — it keeps the secret inside the package.
+func (w *Wallet) Sign(msg []byte) ([]byte, error) {
+	if w == nil || len(w.privateKey) != ed25519.PrivateKeySize {
+		return nil, &WalletError{Message: "wallet is not initialized"}
+	}
+	return ed25519.Sign(w.privateKey, msg), nil
+}
+
 // ToKeypairBytes returns the raw 64-byte keypair.
+//
+// SECURITY: returns the secret key bytes. Use only for persistence (writing
+// to a keystore or env var). Never log or print the result.
 func (w *Wallet) ToKeypairBytes() []byte {
 	return []byte(w.privateKey)
 }
 
 // ToKeypairB58 returns the base58-encoded keypair.
+//
+// SECURITY: returns the secret key in serialized form. Use only for
+// persistence; never log or print the result.
 func (w *Wallet) ToKeypairB58() string {
 	return base58.Encode(w.privateKey)
 }

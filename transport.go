@@ -195,7 +195,9 @@ func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
 	var result struct {
 		Data []ModelInfo `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Cap the response body to maxResponseBytes to prevent a malicious or
+	// misbehaving gateway from forcing the client to allocate unbounded memory.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("parse models: %w", err)
 	}
 	return result.Data, nil

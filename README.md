@@ -30,11 +30,14 @@ func main() {
 	}
 	fmt.Println("Wallet:", wallet.Address())
 
-	client := solvela.NewClient(wallet, nil,
+	client, err := solvela.NewClient(wallet, nil,
 		solvela.WithGatewayURL("https://api.solvela.ai"),
 		solvela.WithCache(true),
 		solvela.WithSessions(true),
 	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	resp, err := client.Chat(context.Background(), &solvela.ChatRequest{
 		Model: "gpt-4o-mini",
@@ -65,7 +68,7 @@ func (s *MySigner) SignPayment(ctx context.Context, amount uint64, recipient str
     // build and sign a USDC-SPL transfer transaction, return PaymentPayload
 }
 
-client := solvela.NewClient(wallet, &MySigner{wallet: wallet}, ...)
+client, err := solvela.NewClient(wallet, &MySigner{wallet: wallet}, ...)
 ```
 
 ## Features
@@ -81,7 +84,7 @@ client := solvela.NewClient(wallet, &MySigner{wallet: wallet}, ...)
 ## Configuration
 
 ```go
-client := solvela.NewClient(wallet, signer,
+client, err := solvela.NewClient(wallet, signer,
 	solvela.WithGatewayURL("https://api.solvela.ai"),
 	solvela.WithTimeout(60 * time.Second),
 	solvela.WithCache(true),
@@ -89,10 +92,32 @@ client := solvela.NewClient(wallet, signer,
 	solvela.WithQualityCheck(true),
 	solvela.WithMaxQualityRetries(2),
 	solvela.WithExpectedRecipient("expected-wallet-address"),
-	solvela.WithMaxPaymentAmount(100000), // atomic USDC units
+	solvela.WithMaxPaymentAmount(100_000_000), // atomic USDC units (100 USDC)
 	solvela.WithFreeFallbackModel("gpt-4o-mini"),
 )
+if err != nil {
+	log.Fatal(err)
+}
 ```
+
+## Breaking Changes (security hardening)
+
+- `NewClient` now returns `(*SolvelaClient, error)`. Callers must check the
+  error; it is non-nil when the configured gateway URL is invalid (for
+  example, a plaintext `http://` URL pointing at a non-loopback host).
+- The default `GatewayURL` is now `https://api.solvela.ai`. Plaintext
+  `http://` URLs are only accepted for `localhost`, `127.0.0.1`, and `::1`.
+- `MaxPaymentAmount` now defaults to **10 USDC atomic units**
+  (`10_000_000`). Callers that legitimately need higher per-request payments
+  must override this via `WithMaxPaymentAmount(...)`. A `nil`
+  `MaxPaymentAmount` is rejected at request time as a misconfiguration.
+- `Wallet.PrivateKey()` has been removed. Use `Wallet.Sign(msg)` for
+  signing operations, or `Wallet.ToKeypairBytes()` /
+  `Wallet.ToKeypairB58()` for persistence (clearly marked secret).
+- `ChatStream` now performs the x402 402-handshake before opening the
+  stream, matching `Chat`'s behavior. A `Signer` is therefore required for
+  paid streaming; when none is configured the call returns
+  `*PaymentRequiredError`.
 
 ## Testing
 

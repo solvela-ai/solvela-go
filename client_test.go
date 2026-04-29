@@ -16,10 +16,13 @@ func TestNewClientCreation(t *testing.T) {
 		t.Fatalf("create wallet: %v", err)
 	}
 
-	client := NewClient(wallet, nil,
+	client, err := NewClient(wallet, nil,
 		WithGatewayURL("https://example.com"),
 		WithTimeout(30*time.Second),
 	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	if client.config.GatewayURL != "https://example.com" {
 		t.Errorf("gateway: got %q, want %q", client.config.GatewayURL, "https://example.com")
@@ -37,7 +40,10 @@ func TestNewClientCreation(t *testing.T) {
 
 func TestNewClientWithCache(t *testing.T) {
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithCache(true))
+	client, err := NewClient(wallet, nil, WithCache(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 	if client.cache == nil {
 		t.Error("cache should be enabled")
 	}
@@ -45,9 +51,28 @@ func TestNewClientWithCache(t *testing.T) {
 
 func TestNewClientWithSessions(t *testing.T) {
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithSessions(true))
+	client, err := NewClient(wallet, nil, WithSessions(true))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 	if client.sessionStore == nil {
 		t.Error("session store should be enabled")
+	}
+}
+
+func TestNewClientRejectsPlaintextRemote(t *testing.T) {
+	wallet, _, _ := CreateWallet()
+	if _, err := NewClient(wallet, nil, WithGatewayURL("http://api.solvela.ai")); err == nil {
+		t.Fatal("expected error rejecting plaintext remote URL")
+	}
+}
+
+func TestNewClientAllowsPlaintextLocalhost(t *testing.T) {
+	wallet, _, _ := CreateWallet()
+	for _, host := range []string{"http://localhost:8402", "http://127.0.0.1:8402", "http://[::1]:8402"} {
+		if _, err := NewClient(wallet, nil, WithGatewayURL(host)); err != nil {
+			t.Errorf("loopback URL %q should be allowed: %v", host, err)
+		}
 	}
 }
 
@@ -65,7 +90,10 @@ func TestClientChatSuccess(t *testing.T) {
 	defer server.Close()
 
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithGatewayURL(server.URL))
+	client, err := NewClient(wallet, nil, WithGatewayURL(server.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	resp, err := client.Chat(context.Background(), &ChatRequest{
 		Model:    "gpt-4",
@@ -98,10 +126,13 @@ func TestClientChatWithCache(t *testing.T) {
 	defer server.Close()
 
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil,
+	client, err := NewClient(wallet, nil,
 		WithGatewayURL(server.URL),
 		WithCache(true),
 	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	req := &ChatRequest{
 		Model:    "gpt-4",
@@ -138,7 +169,7 @@ func TestClientChat402WithoutSigner(t *testing.T) {
 				Currency: "USDC",
 			},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Amount: "1000", PayTo: "recipient123"},
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient123"},
 			},
 		}
 		w.WriteHeader(402)
@@ -147,9 +178,12 @@ func TestClientChat402WithoutSigner(t *testing.T) {
 	defer server.Close()
 
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithGatewayURL(server.URL)) // no signer
+	client, err := NewClient(wallet, nil, WithGatewayURL(server.URL)) // no signer
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
-	_, err := client.Chat(context.Background(), &ChatRequest{
+	_, err = client.Chat(context.Background(), &ChatRequest{
 		Model:    "gpt-4",
 		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
 	})
@@ -164,7 +198,10 @@ func TestClientChat402WithoutSigner(t *testing.T) {
 
 func TestClientLastKnownBalance(t *testing.T) {
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil)
+	client, err := NewClient(wallet, nil)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	if client.LastKnownBalance() != nil {
 		t.Error("expected nil balance initially")
@@ -181,7 +218,10 @@ func TestClientLastKnownBalance(t *testing.T) {
 
 func TestClientStringRedacts(t *testing.T) {
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithGatewayURL("https://gateway.example.com"))
+	client, err := NewClient(wallet, nil, WithGatewayURL("https://gateway.example.com"))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	s := client.String()
 	if !strings.Contains(s, "REDACTED") {
@@ -209,7 +249,10 @@ func TestClientModels(t *testing.T) {
 	defer server.Close()
 
 	wallet, _, _ := CreateWallet()
-	client := NewClient(wallet, nil, WithGatewayURL(server.URL))
+	client, err := NewClient(wallet, nil, WithGatewayURL(server.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	models, err := client.Models(context.Background())
 	if err != nil {
@@ -229,7 +272,7 @@ func TestClientRecipientMismatch(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "1000"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Amount: "1000", PayTo: "wrong-recipient"},
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "wrong-recipient"},
 			},
 		}
 		w.WriteHeader(402)
@@ -239,12 +282,15 @@ func TestClientRecipientMismatch(t *testing.T) {
 
 	wallet, _, _ := CreateWallet()
 	signer := NewKeypairSigner(wallet, "")
-	client := NewClient(wallet, signer,
+	client, err := NewClient(wallet, signer,
 		WithGatewayURL(server.URL),
 		WithExpectedRecipient("expected-recipient"),
 	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
-	_, err := client.Chat(context.Background(), &ChatRequest{
+	_, err = client.Chat(context.Background(), &ChatRequest{
 		Model:    "gpt-4",
 		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
 	})
@@ -263,7 +309,7 @@ func TestClientAmountExceedsMax(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "999999"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Amount: "999999", PayTo: "recipient"},
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "999999", PayTo: "recipient"},
 			},
 		}
 		w.WriteHeader(402)
@@ -273,12 +319,15 @@ func TestClientAmountExceedsMax(t *testing.T) {
 
 	wallet, _, _ := CreateWallet()
 	signer := NewKeypairSigner(wallet, "")
-	client := NewClient(wallet, signer,
+	client, err := NewClient(wallet, signer,
 		WithGatewayURL(server.URL),
 		WithMaxPaymentAmount(1000),
 	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
-	_, err := client.Chat(context.Background(), &ChatRequest{
+	_, err = client.Chat(context.Background(), &ChatRequest{
 		Model:    "gpt-4",
 		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
 	})

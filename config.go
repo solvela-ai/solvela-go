@@ -2,6 +2,16 @@ package solvela
 
 import "time"
 
+// DefaultMaxPaymentAmount is the default cap on a single payment, in atomic
+// USDC units (10 USDC = 10_000_000). This is high enough to cover any
+// reasonable single LLM call, but low enough to block obvious wallet drains
+// when a misbehaving or malicious gateway returns a wildly inflated amount.
+//
+// Callers that need a higher per-request cap must override this explicitly via
+// [WithMaxPaymentAmount]. Callers that want no cap at all should pass the
+// largest uint64 value.
+const DefaultMaxPaymentAmount uint64 = 10_000_000
+
 // ClientConfig holds all configuration for a Solvela client.
 type ClientConfig struct {
 	GatewayURL         string
@@ -19,13 +29,20 @@ type ClientConfig struct {
 }
 
 // DefaultConfig returns a ClientConfig with sensible defaults.
+//
+// Security defaults:
+//   - GatewayURL points to the production HTTPS endpoint.
+//   - MaxPaymentAmount is set to [DefaultMaxPaymentAmount] (10 USDC atomic) to
+//     prevent wallet drains from a misconfigured or malicious gateway.
 func DefaultConfig() ClientConfig {
+	defaultMax := DefaultMaxPaymentAmount
 	return ClientConfig{
-		GatewayURL:        "http://localhost:8402",
+		GatewayURL:        "https://api.solvela.ai",
 		RPCURL:            "https://api.mainnet-beta.solana.com",
 		Timeout:           180 * time.Second,
 		SessionTTL:        1800 * time.Second,
 		MaxQualityRetries: 1,
+		MaxPaymentAmount:  &defaultMax,
 	}
 }
 
