@@ -39,10 +39,13 @@ func TestLiveChat402(t *testing.T) {
 		t.Fatalf("create wallet: %v", err)
 	}
 
-	client := solvela.NewClient(wallet, nil,
+	client, err := solvela.NewClient(wallet, nil,
 		solvela.WithGatewayURL(gatewayURL),
 		solvela.WithTimeout(30*time.Second),
 	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
 
 	_, err = client.Chat(context.Background(), &solvela.ChatRequest{
 		Model: "gpt-4o-mini",

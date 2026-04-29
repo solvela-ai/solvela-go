@@ -8,7 +8,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.GatewayURL != "http://localhost:8402" {
+	if cfg.GatewayURL != "https://api.solvela.ai" {
 		t.Errorf("GatewayURL: got %q", cfg.GatewayURL)
 	}
 	if cfg.RPCURL != "https://api.mainnet-beta.solana.com" {
@@ -35,8 +35,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.EnableQualityCheck {
 		t.Error("EnableQualityCheck should default to false")
 	}
-	if cfg.MaxPaymentAmount != nil {
-		t.Error("MaxPaymentAmount should default to nil")
+	if cfg.MaxPaymentAmount == nil {
+		t.Error("MaxPaymentAmount should default to a non-nil cap (security)")
+	} else if *cfg.MaxPaymentAmount != DefaultMaxPaymentAmount {
+		t.Errorf("MaxPaymentAmount default: got %d, want %d", *cfg.MaxPaymentAmount, DefaultMaxPaymentAmount)
 	}
 	if cfg.ExpectedRecipient != "" {
 		t.Error("ExpectedRecipient should default to empty")

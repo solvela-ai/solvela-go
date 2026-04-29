@@ -1,7 +1,9 @@
 package solvela
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -96,6 +98,11 @@ func (s *SessionStore) CleanupExpired() {
 }
 
 // DeriveSessionID generates a deterministic session ID from the first message.
+//
+// Deprecated: this function keys only on the first message, which means
+// distinct conversations that happen to share the same opening message
+// collide on the same session. Prefer [DeriveSessionIDWithSalt], which mixes
+// in a per-client random salt and the message count to avoid that collision.
 func DeriveSessionID(messages []ChatMessage) string {
 	h := sha256.New()
 	if len(messages) > 0 {
@@ -103,4 +110,32 @@ func DeriveSessionID(messages []ChatMessage) string {
 		h.Write([]byte(messages[0].Content))
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)[:16])
+}
+
+// DeriveSessionIDWithSalt generates a session ID that mixes a per-client salt,
+// the message count, and the first message. The salt prevents cross-client
+// session aliasing, and the message count separates conversations that begin
+// with the same prompt but evolve differently.
+func DeriveSessionIDWithSalt(salt []byte, messages []ChatMessage) string {
+	h := sha256.New()
+	h.Write(salt)
+	var countBuf [8]byte
+	binary.BigEndian.PutUint64(countBuf[:], uint64(len(messages)))
+	h.Write(countBuf[:])
+	if len(messages) > 0 {
+		h.Write([]byte(messages[0].Role))
+		h.Write([]byte(messages[0].Content))
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)[:16])
+}
+
+// newSessionSalt returns 8 bytes of cryptographically random salt for use as
+// a per-client session-ID salt. Returns an error only if the system entropy
+// source is unavailable.
+func newSessionSalt() ([]byte, error) {
+	salt := make([]byte, 8)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	return salt, nil
 }

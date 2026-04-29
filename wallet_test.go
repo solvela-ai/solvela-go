@@ -23,8 +23,17 @@ func TestCreateWallet(t *testing.T) {
 	if len(w.PublicKey()) != ed25519.PublicKeySize {
 		t.Errorf("public key length: got %d, want %d", len(w.PublicKey()), ed25519.PublicKeySize)
 	}
-	if len(w.PrivateKey()) != ed25519.PrivateKeySize {
-		t.Errorf("private key length: got %d, want %d", len(w.PrivateKey()), ed25519.PrivateKeySize)
+	// Private key is no longer exported; verify length via the persistence helper.
+	if len(w.ToKeypairBytes()) != ed25519.PrivateKeySize {
+		t.Errorf("private key length: got %d, want %d", len(w.ToKeypairBytes()), ed25519.PrivateKeySize)
+	}
+	// Sign should succeed on a freshly created wallet.
+	sig, err := w.Sign([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		t.Errorf("sig length: got %d, want %d", len(sig), ed25519.SignatureSize)
 	}
 }
 
