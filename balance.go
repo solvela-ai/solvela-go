@@ -1,6 +1,7 @@
 package solvela
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -76,7 +77,11 @@ func (m *BalanceMonitor) run() {
 func (m *BalanceMonitor) poll() {
 	balance, err := m.fetchBalance()
 	if err != nil {
-		return // swallow errors
+		// Surface poll errors. A silent failure would leave LastKnownBalance
+		// stuck at nil and silently disable the freeFallbackModel guard in
+		// SolvelaClient. Mirrors the warn-on-poll-error fix in the TS SDK.
+		log.Printf("[BalanceMonitor] balance poll failed: %v", err)
+		return
 	}
 
 	m.mu.Lock()

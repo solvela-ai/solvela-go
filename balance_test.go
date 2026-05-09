@@ -1,7 +1,10 @@
 package solvela
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,7 +153,15 @@ func TestBalanceMonitorNilBeforeStart(t *testing.T) {
 	}
 }
 
-func TestBalanceMonitorSwallowsErrors(t *testing.T) {
+func TestBalanceMonitorLogsAndRecoversAfterError(t *testing.T) {
+	// Capture log output so we can assert the warning is emitted on the
+	// failed first poll. Mirrors the warn-on-poll-error contract in the TS
+	// SDK: a silent failure would leave LastKnownBalance() stuck at nil.
+	var buf bytes.Buffer
+	originalOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(originalOutput)
+
 	callIdx := 0
 	var mu sync.Mutex
 
@@ -179,5 +190,13 @@ func TestBalanceMonitorSwallowsErrors(t *testing.T) {
 	}
 	if *balance != 42.0 {
 		t.Errorf("balance: got %f, want 42.0", *balance)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "[BalanceMonitor]") {
+		t.Errorf("expected log to contain '[BalanceMonitor]' tag; got: %q", logged)
+	}
+	if !strings.Contains(logged, "network error") {
+		t.Errorf("expected log to contain underlying error message; got: %q", logged)
 	}
 }
