@@ -3,9 +3,11 @@ package solvela
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -260,6 +262,131 @@ func TestTransportFetchModels500(t *testing.T) {
 	}
 	if gatewayErr.Status != 500 {
 		t.Errorf("status: got %d, want 500", gatewayErr.Status)
+	}
+}
+
+// TestSendChatStreamSurfacesScannerErr drives a server that hijacks the
+// connection, writes a partial SSE line (no terminating newline) along with
+// a chunked-transfer header, and then closes the underlying TCP connection.
+// The bufio scanner inside SendChatStream must surface the resulting read
+// error via the channel as a ChatChunkOrError{Err: ...} rather than letting
+// the stream look like a clean close.
+func TestSendChatStreamSurfacesScannerErr(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hijack the connection so we can write malformed/truncated bytes
+		// directly. After writing a partial chunk the underlying TCP
+		// connection is closed, which triggers an unexpected EOF inside the
+		// scanner once it has consumed the partial chunk.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatalf("ResponseWriter does not support hijack")
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		// Send the response head with chunked encoding; we will then write a
+		// chunk that *claims* more bytes than we actually deliver before
+		// closing. This guarantees the client-side bufio.Scanner observes an
+		// unexpected EOF rather than a clean close.
+		fmt.Fprint(bufrw, "HTTP/1.1 200 OK\r\n")
+		fmt.Fprint(bufrw, "Content-Type: text/event-stream\r\n")
+		fmt.Fprint(bufrw, "Transfer-Encoding: chunked\r\n")
+		fmt.Fprint(bufrw, "\r\n")
+		// First chunk: a complete, valid JSON SSE event terminated with
+		// "\n\n". The scanner consumes one line, the JSON parses, the
+		// chunk lands on the channel, and the loop continues. The second
+		// chunk header promises 100 bytes but we only write 13 before
+		// slamming the connection shut. The Go HTTP client surfaces this
+		// truncation as io.ErrUnexpectedEOF, which bufio.Scanner reports
+		// via scanner.Err() (since it is non-EOF). This is the exact
+		// surface the security-fix agent added handling for.
+		role := "assistant"
+		content := "first"
+		first := fmt.Sprintf(`{"id":"c1","model":"gpt-4","choices":[{"index":0,"delta":{"role":%q,"content":%q}}]}`, role, content)
+		ssePayload := fmt.Sprintf("data: %s\n\n", first)
+		fmt.Fprintf(bufrw, "%x\r\n", len(ssePayload))
+		fmt.Fprint(bufrw, ssePayload)
+		fmt.Fprint(bufrw, "\r\n")
+		// Promise a second 100-byte chunk but only deliver 7 bytes, then
+		// close. The Go chunked-transfer reader surfaces this truncation
+		// as io.ErrUnexpectedEOF on the next read after the buffered bytes
+		// are consumed. The bytes themselves do NOT begin with "data: " so
+		// the scanner skips them; the next Scan call observes the
+		// truncation as a non-EOF error and surfaces it via scanner.Err().
+		fmt.Fprint(bufrw, "64\r\n")  // 0x64 = 100 in hex (promise 100 bytes)
+		fmt.Fprint(bufrw, "garbage") // 7 bytes, no "data: " prefix, no terminator
+		bufrw.Flush()
+		conn.Close()
+	}))
+	defer server.Close()
+
+	transport := NewTransport(server.URL, 10*time.Second)
+	req := &ChatRequest{Model: "gpt-4", Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}}}
+
+	ch, err := transport.SendChatStream(context.Background(), req, "", nil)
+	if err != nil {
+		t.Fatalf("SendChatStream: %v", err)
+	}
+
+	var sawErr bool
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case item, ok := <-ch:
+			if !ok {
+				goto done
+			}
+			if item.Err != nil {
+				sawErr = true
+				if !strings.Contains(item.Err.Error(), "stream read error") {
+					t.Errorf("expected wrapped scanner error, got %v", item.Err)
+				}
+			}
+		case <-timeout:
+			t.Fatal("stream never closed")
+		}
+	}
+done:
+	if !sawErr {
+		t.Error("expected ChatChunkOrError with non-nil Err for truncated stream; got clean close")
+	}
+}
+
+// TestSendChatStreamRejectsMalformed402Body verifies that a 402 with a
+// non-JSON body returns *GatewayError mentioning "parse 402 body" rather
+// than silently producing a zero-value PaymentRequiredError that the SDK
+// could not act on. This exercises the body-parse wrapper added by the
+// security fix agent.
+func TestSendChatStreamRejectsMalformed402Body(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(402)
+		_, _ = w.Write([]byte("not-json-at-all<<<"))
+	}))
+	defer server.Close()
+
+	transport := NewTransport(server.URL, 10*time.Second)
+	req := &ChatRequest{Model: "gpt-4", Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}}}
+
+	_, err := transport.SendChatStream(context.Background(), req, "", nil)
+	if err == nil {
+		t.Fatal("expected error for malformed 402 body, got nil")
+	}
+	// Must surface as GatewayError with the parse-error wrapper, not as a
+	// PaymentRequiredError carrying a zero-value PaymentRequired struct.
+	var gwErr *GatewayError
+	if !errors.As(err, &gwErr) {
+		t.Fatalf("expected *GatewayError, got %T: %v", err, err)
+	}
+	if gwErr.Status != 402 {
+		t.Errorf("status: got %d, want 402", gwErr.Status)
+	}
+	if !strings.Contains(gwErr.Message, "parse 402 body") {
+		t.Errorf("expected message to contain 'parse 402 body', got %q", gwErr.Message)
+	}
+	if _, isPRE := err.(*PaymentRequiredError); isPRE {
+		t.Error("malformed 402 body must NOT be returned as PaymentRequiredError")
 	}
 }
 

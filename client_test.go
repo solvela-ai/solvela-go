@@ -981,3 +981,251 @@ done:
 		t.Errorf("synthesized stream content: got %v, want [\"hello world\"]", got)
 	}
 }
+
+// TestChatStreamPaid402Path drives the end-to-end paid streaming path: the
+// non-streaming probe returns 402 (price discovery), the client signs with
+// the stub signer, and the follow-up streaming POST returns multi-chunk SSE.
+// Asserts the chunks arrive in order and the Payment-Signature header is set
+// on the streaming request. Before recent agent work this happy-path was
+// uncovered.
+func TestChatStreamPaid402Path(t *testing.T) {
+	var serverURL string
+	chunkContents := []string{"alpha", "beta", "gamma"}
+
+	var streamSigSeen string
+	var streamSigMu sync.Mutex
+	var probeCount, streamCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !req.Stream {
+			// Probe: demand payment.
+			atomic.AddInt32(&probeCount, 1)
+			pr := PaymentRequired{
+				X402Version:   X402Version,
+				CostBreakdown: CostBreakdown{Total: "100"},
+				Resource:      Resource{URL: serverURL + "/v1/chat/completions", Method: "POST"},
+				Accepts: []PaymentAccept{
+					{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+				},
+			}
+			w.WriteHeader(402)
+			json.NewEncoder(w).Encode(pr)
+			return
+		}
+		// Streaming follow-up after sign.
+		atomic.AddInt32(&streamCount, 1)
+		streamSigMu.Lock()
+		streamSigSeen = r.Header.Get("Payment-Signature")
+		streamSigMu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("ResponseWriter does not support flushing")
+			return
+		}
+		for _, c := range chunkContents {
+			content := c
+			role := RoleAssistant
+			chunk := ChatChunk{
+				ID:      "chunk-" + c,
+				Model:   "gpt-4",
+				Choices: []ChatChunkChoice{{Index: 0, Delta: ChatDelta{Role: &role, Content: &content}}},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, fakeStreamSigner{},
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	ch, err := client.ChatStream(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var got []string
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case item, ok := <-ch:
+			if !ok {
+				goto done
+			}
+			if item.Err != nil {
+				t.Fatalf("unexpected stream error: %v", item.Err)
+			}
+			if item.Chunk == nil || len(item.Chunk.Choices) == 0 || item.Chunk.Choices[0].Delta.Content == nil {
+				t.Fatal("chunk missing content")
+			}
+			got = append(got, *item.Chunk.Choices[0].Delta.Content)
+		case <-timeout:
+			t.Fatal("stream never closed")
+		}
+	}
+done:
+
+	if len(got) != len(chunkContents) {
+		t.Fatalf("chunks: got %d, want %d (got=%v)", len(got), len(chunkContents), got)
+	}
+	for i, want := range chunkContents {
+		if got[i] != want {
+			t.Errorf("chunk[%d]: got %q, want %q (full=%v)", i, got[i], want, got)
+		}
+	}
+	if pc := atomic.LoadInt32(&probeCount); pc != 1 {
+		t.Errorf("probe count: got %d, want 1", pc)
+	}
+	if sc := atomic.LoadInt32(&streamCount); sc != 1 {
+		t.Errorf("stream count: got %d, want 1", sc)
+	}
+	streamSigMu.Lock()
+	defer streamSigMu.Unlock()
+	if streamSigSeen == "" {
+		t.Error("Payment-Signature header missing on streaming follow-up")
+	}
+}
+
+// TestChatThreeStrikeEscalationViaChat asserts that the wired escalation
+// path actually swaps the outgoing model on the wire after three identical
+// session-keyed Chat() calls. The unit-level SessionStore test covers the
+// counter logic in isolation; this exercises the integration through Chat.
+func TestChatThreeStrikeEscalationViaChat(t *testing.T) {
+	var seenModels []string
+	var modelMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		modelMu.Lock()
+		seenModels = append(seenModels, req.Model)
+		modelMu.Unlock()
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:    "ok",
+			Model: req.Model,
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: "ok"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil,
+		WithGatewayURL(server.URL),
+		WithSessions(true),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	req := &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Same question"}},
+	}
+	// First three Chat calls record requests and trip the three-strike
+	// counter; the fourth must see the escalated model on the wire.
+	for i := 0; i < 4; i++ {
+		if _, err := client.Chat(context.Background(), req); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+
+	modelMu.Lock()
+	defer modelMu.Unlock()
+	if len(seenModels) != 4 {
+		t.Fatalf("server saw %d requests, want 4: %v", len(seenModels), seenModels)
+	}
+	// Read the session's escalated model directly to learn what name the
+	// store substituted, then assert the outgoing model on call #4 matches it
+	// (and that calls #1..#3 used the original requested model).
+	sessionID := DeriveSessionIDWithSalt(client.sessionSalt, req.Messages)
+	client.sessionStore.mu.Lock()
+	entry, ok := client.sessionStore.sessions[sessionID]
+	if !ok {
+		client.sessionStore.mu.Unlock()
+		t.Fatal("session not stored")
+	}
+	if !entry.escalated {
+		client.sessionStore.mu.Unlock()
+		t.Fatal("session should be escalated after three identical RecordRequests")
+	}
+	escalatedModel := entry.model
+	client.sessionStore.mu.Unlock()
+
+	for i := 0; i < 3; i++ {
+		if seenModels[i] != "gpt-4" {
+			t.Errorf("call %d: wire model = %q, want %q (pre-escalation)", i, seenModels[i], "gpt-4")
+		}
+	}
+	if seenModels[3] != escalatedModel {
+		t.Errorf("call 4: wire model = %q, want escalated %q", seenModels[3], escalatedModel)
+	}
+}
+
+// TestChatPaymentRejectedAfterSign drives a gateway that returns 402 on
+// both the probe AND the post-sign re-issue. After the SDK signs and sends
+// the Payment-Signature header, a second 402 must surface as
+// *PaymentRejectedError, not loop forever.
+func TestChatPaymentRejectedAfterSign(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always return 402 — the gateway "rejects" both the probe and the
+		// signed retry. The double-402 guard in sendWithPayment must catch
+		// the second 402 and return PaymentRejectedError.
+		pr := PaymentRequired{
+			X402Version:   X402Version,
+			CostBreakdown: CostBreakdown{Total: "100"},
+			Resource:      Resource{URL: serverURL + "/v1/chat/completions", Method: "POST"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, fakeStreamSigner{},
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected PaymentRejectedError, got nil")
+	}
+	var pre *PaymentRejectedError
+	if !errors.As(err, &pre) {
+		t.Fatalf("expected *PaymentRejectedError, got %T: %v", err, err)
+	}
+	if pre.Reason == "" {
+		t.Error("PaymentRejectedError.Reason should be non-empty")
+	}
+}
