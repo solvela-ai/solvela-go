@@ -226,8 +226,13 @@ func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
 	if resp.StatusCode != 200 {
 		// Surface the response body so callers can diagnose an upstream
 		// failure (rate-limit message, auth error, etc.) instead of seeing
-		// a bare status code.
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		// a bare status code. Mirror SendChatStream's non-200 branch: if the
+		// body read itself fails (connection reset, timeout mid-drain), report
+		// that explicitly rather than producing an empty Message.
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		if readErr != nil {
+			return nil, &GatewayError{Status: resp.StatusCode, Message: fmt.Sprintf("read error body: %v", readErr)}
+		}
 		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
 	}
 	var result struct {
