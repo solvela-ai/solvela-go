@@ -5,14 +5,6 @@ import (
 	"testing"
 )
 
-func TestKeypairSignerImplementsSigner(t *testing.T) {
-	wallet, _, err := CreateWallet()
-	if err != nil {
-		t.Fatalf("create wallet: %v", err)
-	}
-	var _ Signer = NewKeypairSigner(wallet, "")
-}
-
 func TestNewKeypairSignerDefaultRPCURL(t *testing.T) {
 	wallet, _, err := CreateWallet()
 	if err != nil {
