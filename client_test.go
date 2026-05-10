@@ -3,12 +3,14 @@ package solvela
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -840,5 +842,142 @@ func TestClientAllowsMatchingResourceURL(t *testing.T) {
 				t.Fatalf("origin check incorrectly rejected matching URL: %v", err)
 			}
 		}
+	}
+}
+
+// TestChatReturnsQualityDegradedErrorAfterRetryExhaustion drives a gateway
+// that returns empty content on every call, exhausts the quality retry
+// budget (1 + MaxQualityRetries calls), and asserts that Chat surfaces a
+// *QualityDegradedError instead of silently returning the empty response.
+// Also asserts that a degraded response is NOT cached — replaying it
+// forever from the cache would be worse than the degraded result.
+func TestChatReturnsQualityDegradedErrorAfterRetryExhaustion(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:    "chat-empty",
+			Model: "gpt-4",
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: ""}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil,
+		WithGatewayURL(server.URL),
+		WithCache(true),
+		WithQualityCheck(true),
+		WithMaxQualityRetries(2),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	req := &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	}
+	_, err = client.Chat(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected QualityDegradedError, got nil")
+	}
+	var qde *QualityDegradedError
+	if !errors.As(err, &qde) {
+		t.Fatalf("expected *QualityDegradedError, got %T: %v", err, err)
+	}
+	if qde.Reason != DegradedEmptyContent {
+		t.Errorf("reason: got %q, want %q", qde.Reason, DegradedEmptyContent)
+	}
+	if qde.Response == nil {
+		t.Fatal("Response field must surface the last (degraded) response")
+	}
+	if qde.Response.ID != "chat-empty" {
+		t.Errorf("Response.ID: got %q, want %q", qde.Response.ID, "chat-empty")
+	}
+
+	// Initial + 2 retries = 3 total HTTP calls.
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("HTTP calls: got %d, want 3 (initial + MaxQualityRetries)", got)
+	}
+
+	// The degraded response must NOT be cached. A second call should hit the
+	// gateway again rather than replay an empty response.
+	_, err = client.Chat(context.Background(), req)
+	if err == nil {
+		t.Fatal("second call: expected error, got nil")
+	}
+	if got := atomic.LoadInt32(&calls); got != 6 {
+		t.Errorf("HTTP calls after second Chat: got %d, want 6 (degraded responses must not be cached)", got)
+	}
+}
+
+// TestChatStreamReusesProbeResponseWhenNoPaymentRequired covers the
+// price-discovery probe reuse fix: when the gateway returns 200 to the
+// non-streaming probe, ChatStream must NOT issue a second streaming
+// request. Instead it should synthesize a chunk channel from the probe
+// body, saving the caller a duplicate paid round trip.
+func TestChatStreamReusesProbeResponseWhenNoPaymentRequired(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		// Always answer with a regular ChatResponse — the probe path returns
+		// Stream=false; if the SDK incorrectly issues a second streaming
+		// request the handler would see Stream=true here too, but our
+		// assertion is on the call count rather than the body shape.
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:    "probe-reused",
+			Model: req.Model,
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: "hello world"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil, WithGatewayURL(server.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	ch, err := client.ChatStream(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var got []string
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case item, ok := <-ch:
+			if !ok {
+				goto done
+			}
+			if item.Err != nil {
+				t.Fatalf("unexpected stream error: %v", item.Err)
+			}
+			if item.Chunk == nil || len(item.Chunk.Choices) == 0 || item.Chunk.Choices[0].Delta.Content == nil {
+				t.Fatal("synthesized chunk missing content")
+			}
+			got = append(got, *item.Chunk.Choices[0].Delta.Content)
+		case <-timeout:
+			t.Fatal("stream never closed")
+		}
+	}
+done:
+
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("HTTP calls: got %d, want 1 (probe response must be reused, not re-fetched)", n)
+	}
+	if len(got) != 1 || got[0] != "hello world" {
+		t.Errorf("synthesized stream content: got %v, want [\"hello world\"]", got)
 	}
 }

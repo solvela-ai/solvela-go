@@ -168,15 +168,27 @@ func (c *SolvelaClient) Chat(ctx context.Context, request *ChatRequest) (*ChatRe
 		return nil, err
 	}
 
-	// Step 5: Quality check + retry
+	// Step 5: Quality check + retry. After the retry loop exits we re-evaluate
+	// the final response: a still-degraded result must surface as
+	// [QualityDegradedError] rather than be silently returned. Caching a
+	// degraded response would replay it forever; skip the cache write on the
+	// error path.
 	if c.config.EnableQualityCheck {
-		for i := 0; i < c.config.MaxQualityRetries; i++ {
+		var lastReason DegradedReason
+		for i := 0; i <= c.config.MaxQualityRetries; i++ {
 			if len(response.Choices) == 0 {
+				lastReason = DegradedEmptyContent
+			} else {
+				lastReason = CheckDegraded(response.Choices[0].Message.Content)
+			}
+			if lastReason == "" {
 				break
 			}
-			reason := CheckDegraded(response.Choices[0].Message.Content)
-			if reason == "" {
-				break
+			if i == c.config.MaxQualityRetries {
+				// Exhausted retries; the response is still degraded. Do not
+				// cache and do not record the session — return the typed
+				// error so callers can branch on it.
+				return nil, &QualityDegradedError{Reason: lastReason, Response: response}
 			}
 			response, err = c.sendWithPayment(ctx, effectiveReq, map[string]string{
 				"X-Solvela-Retry-Reason": "degraded",
@@ -236,9 +248,27 @@ func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<
 	}
 
 	// Step 3: Resolve payment (if any) before opening the stream.
-	sig, err := c.resolvePaymentSignature(ctx, effectiveReq)
+	//
+	// resolvePaymentSignature first issues a non-streaming probe so the gateway
+	// can return 402 (price discovery) or 200 (no payment required, full
+	// response). When the probe returns 200 the body IS already a complete
+	// completion: opening a second streaming connection would cost the caller
+	// a second paid request and discard the first. Reuse the probe response
+	// by synthesizing a single-chunk SSE-like stream instead.
+	sig, probeResp, err := c.resolvePaymentSignature(ctx, effectiveReq)
 	if err != nil {
 		return nil, err
+	}
+	if probeResp != nil {
+		// Probe returned 200 — turn the ChatResponse into a one-shot channel
+		// and avoid the second paid round trip. Session recording happens
+		// synchronously here because there is no upstream goroutine to defer
+		// it to.
+		if c.sessionStore != nil && sessionID != "" {
+			hash := CacheKey(model, request.Messages)
+			c.sessionStore.RecordRequest(sessionID, hash)
+		}
+		return synthesizeStreamFromResponse(probeResp), nil
 	}
 
 	// Drive the upstream goroutine with a child context so cancellation here
@@ -351,23 +381,73 @@ func (c *SolvelaClient) sendWithPayment(ctx context.Context, request *ChatReques
 
 // resolvePaymentSignature issues a non-streaming probe to discover whether the
 // gateway requires payment for the given request, and signs the payment if so.
-// Returns the encoded Payment-Signature header value, or "" if no payment is
-// needed. The probe shares the same handshake logic as non-streaming Chat —
-// the gateway returns 402 on the initial POST whether or not the response is
+// Returns:
+//   - sig:        the encoded Payment-Signature header value, or "" if no
+//                 payment is needed (or the probe already returned a fully
+//                 resolved 200 response).
+//   - probeResp:  non-nil when the probe returned 200 with a complete
+//                 ChatResponse. Callers (ChatStream) MUST reuse this body
+//                 instead of issuing a second request — opening a streaming
+//                 follow-up would charge the caller twice and discard the
+//                 already-paid completion.
+//   - err:        any error encountered.
+//
+// The probe shares the same handshake logic as non-streaming Chat — the
+// gateway returns 402 on the initial POST whether or not the response is
 // streamed, so the same flow is safe to reuse.
-func (c *SolvelaClient) resolvePaymentSignature(ctx context.Context, request *ChatRequest) (string, error) {
+func (c *SolvelaClient) resolvePaymentSignature(ctx context.Context, request *ChatRequest) (string, *ChatResponse, error) {
 	probeReq := *request
 	probeReq.Stream = false
 
 	result, err := c.transport.SendChat(ctx, &probeReq, "", nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if result.PaymentRequired == nil {
-		// No payment required; the streaming request can proceed unauthenticated.
-		return "", nil
+		// No payment required; surface the already-resolved response so the
+		// streaming caller can replay it without a second paid request.
+		return "", result.Response, nil
 	}
-	return c.signPaymentRequired(ctx, result.PaymentRequired)
+	sig, err := c.signPaymentRequired(ctx, result.PaymentRequired)
+	if err != nil {
+		return "", nil, err
+	}
+	return sig, nil, nil
+}
+
+// synthesizeStreamFromResponse converts a fully-resolved [ChatResponse] into a
+// closed [ChatChunkOrError] channel that emits one chunk per choice and then
+// closes. This lets [SolvelaClient.ChatStream] reuse a 200 response from the
+// price-discovery probe instead of issuing a second paid request just to get
+// the bytes in streaming form.
+func synthesizeStreamFromResponse(resp *ChatResponse) <-chan ChatChunkOrError {
+	ch := make(chan ChatChunkOrError, len(resp.Choices)+1)
+	for _, choice := range resp.Choices {
+		// Snapshot per-iteration so each chunk owns its own role/content
+		// pointers; addressing the loop variable directly would alias every
+		// emitted chunk to the same backing storage.
+		role := choice.Message.Role
+		content := choice.Message.Content
+		chunk := &ChatChunk{
+			ID:      resp.ID,
+			Object:  resp.Object,
+			Created: resp.Created,
+			Model:   resp.Model,
+			Choices: []ChatChunkChoice{
+				{
+					Index: choice.Index,
+					Delta: ChatDelta{
+						Role:    &role,
+						Content: &content,
+					},
+					FinishReason: choice.FinishReason,
+				},
+			},
+		}
+		ch <- ChatChunkOrError{Chunk: chunk}
+	}
+	close(ch)
+	return ch
 }
 
 // signPaymentRequired runs the validation + signer pipeline for a 402 response

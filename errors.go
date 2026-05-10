@@ -86,3 +86,17 @@ type TimeoutError struct {
 func (e *TimeoutError) Error() string {
 	return fmt.Sprintf("request timed out after %.1fs", e.TimeoutSecs)
 }
+
+// QualityDegradedError is returned by [SolvelaClient.Chat] when a response
+// repeatedly fails the quality check (after MaxQualityRetries) and the
+// caller cannot get a clean response. The Response field is the last
+// (still-degraded) response, available for callers that prefer to use it
+// anyway. Degraded responses are never cached.
+type QualityDegradedError struct {
+	Reason   DegradedReason
+	Response *ChatResponse
+}
+
+func (e *QualityDegradedError) Error() string {
+	return fmt.Sprintf("response quality degraded after retries: %s", e.Reason)
+}

@@ -79,6 +79,39 @@ func TestTimeoutError(t *testing.T) {
 	}
 }
 
+func TestQualityDegradedError(t *testing.T) {
+	resp := &ChatResponse{
+		ID: "chat-degraded",
+		Choices: []ChatChoice{
+			{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: ""}},
+		},
+	}
+	err := &QualityDegradedError{Reason: DegradedEmptyContent, Response: resp}
+
+	want := "response quality degraded after retries: empty_content"
+	if err.Error() != want {
+		t.Errorf("got %q, want %q", err.Error(), want)
+	}
+
+	// Round-trip Response: the same pointer should be retrievable so callers
+	// can opt into the degraded response if they want it.
+	if err.Response != resp {
+		t.Error("Response field should round-trip the supplied pointer")
+	}
+	if err.Response.ID != "chat-degraded" {
+		t.Errorf("Response.ID: got %q, want %q", err.Response.ID, "chat-degraded")
+	}
+
+	// Type assertion via errors.As.
+	var qde *QualityDegradedError
+	if !errors.As(error(err), &qde) {
+		t.Error("expected QualityDegradedError type assertion to succeed")
+	}
+	if qde.Reason != DegradedEmptyContent {
+		t.Errorf("Reason after As: got %q, want %q", qde.Reason, DegradedEmptyContent)
+	}
+}
+
 func TestErrorTypeAssertions(t *testing.T) {
 	var err error
 
