@@ -94,8 +94,12 @@ func (t *Transport) SendChat(ctx context.Context, request *ChatRequest, paymentS
 		}
 		return &SendChatResult{PaymentRequired: &pr}, nil
 	default:
+		// Best-effort JSON parse: prefer .error from a structured body, fall
+		// back to the raw response text. A non-JSON body is expected here
+		// (e.g., HTML error pages from a misconfigured proxy), so the
+		// unmarshal error is intentionally discarded.
 		var errData map[string]interface{}
-		json.Unmarshal(data, &errData)
+		_ = json.Unmarshal(data, &errData)
 		msg := string(data)
 		if e, ok := errData["error"]; ok {
 			msg = fmt.Sprintf("%v", e)
@@ -220,7 +224,16 @@ func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, &GatewayError{Status: resp.StatusCode}
+		// Surface the response body so callers can diagnose an upstream
+		// failure (rate-limit message, auth error, etc.) instead of seeing
+		// a bare status code. Mirror SendChatStream's non-200 branch: if the
+		// body read itself fails (connection reset, timeout mid-drain), report
+		// that explicitly rather than producing an empty Message.
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		if readErr != nil {
+			return nil, &GatewayError{Status: resp.StatusCode, Message: fmt.Sprintf("read error body: %v", readErr)}
+		}
+		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
 	}
 	var result struct {
 		Data []ModelInfo `json:"data"`

@@ -18,7 +18,6 @@ type SessionInfo struct {
 type sessionEntry struct {
 	model        string
 	created      time.Time
-	requestCount int
 	recentHashes []uint64
 	escalated    bool
 }
@@ -41,11 +40,10 @@ func NewSessionStore(ttl time.Duration) *SessionStore {
 // GetOrCreate returns session info for the given ID, creating a new session if needed.
 // Expired sessions are replaced with fresh ones.
 //
-// GetOrCreate is read-only with respect to request counting: it does not
-// increment requestCount. Counting is the responsibility of
-// [SessionStore.RecordRequest], which is invoked once per successful request
-// from the client. Incrementing here would double-count and trigger the
-// three-strike escalation prematurely.
+// GetOrCreate is read-only with respect to escalation: it never advances the
+// three-strike counter. That is the exclusive job of
+// [SessionStore.RecordRequest], invoked once per successful request from the
+// client.
 func (s *SessionStore) GetOrCreate(sessionID, defaultModel string) SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +53,6 @@ func (s *SessionStore) GetOrCreate(sessionID, defaultModel string) SessionInfo {
 		s.sessions[sessionID] = &sessionEntry{
 			model:        defaultModel,
 			created:      time.Now(),
-			requestCount: 0,
 			recentHashes: make([]uint64, 0),
 			escalated:    false,
 		}

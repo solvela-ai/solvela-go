@@ -7,6 +7,11 @@ type Signer interface {
 	SignPayment(ctx context.Context, amountAtomic uint64, recipient string, resource Resource, accepted PaymentAccept) (*PaymentPayload, error)
 }
 
+// Compile-time assertion that UnimplementedSigner satisfies Signer. If the
+// interface drifts (e.g., a method is renamed), the build fails here rather
+// than at first runtime call.
+var _ Signer = (*UnimplementedSigner)(nil)
+
 // UnimplementedSigner is a placeholder Signer for callers who do not yet
 // have a real Solana USDC-SPL signing implementation. Its SignPayment
 // method always returns an error. Construct your own Signer implementation

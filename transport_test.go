@@ -1,6 +1,7 @@
 package solvela
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -248,6 +249,7 @@ func TestTransportFetchModels(t *testing.T) {
 func TestTransportFetchModels500(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
 	}))
 	defer server.Close()
 
@@ -262,6 +264,35 @@ func TestTransportFetchModels500(t *testing.T) {
 	}
 	if gatewayErr.Status != 500 {
 		t.Errorf("status: got %d, want 500", gatewayErr.Status)
+	}
+	if !strings.Contains(gatewayErr.Message, "internal server error") {
+		t.Errorf("message: got %q, want substring %q", gatewayErr.Message, "internal server error")
+	}
+}
+
+// TestTransportFetchModels500BodyCapped sends an error body larger than
+// maxResponseBytes and verifies the LimitReader ceiling holds, so a
+// misbehaving gateway cannot force an unbounded GatewayError.Message
+// allocation. Locks the cap as a regression-prevention invariant.
+func TestTransportFetchModels500BodyCapped(t *testing.T) {
+	oversized := bytes.Repeat([]byte("A"), maxResponseBytes+1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write(oversized)
+	}))
+	defer server.Close()
+
+	transport := NewTransport(server.URL, 30*time.Second)
+	_, err := transport.FetchModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	gatewayErr, ok := err.(*GatewayError)
+	if !ok {
+		t.Fatalf("expected GatewayError, got %T", err)
+	}
+	if len(gatewayErr.Message) > maxResponseBytes {
+		t.Errorf("message length: got %d, want <= %d (LimitReader cap)", len(gatewayErr.Message), maxResponseBytes)
 	}
 }
 
