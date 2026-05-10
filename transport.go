@@ -94,8 +94,12 @@ func (t *Transport) SendChat(ctx context.Context, request *ChatRequest, paymentS
 		}
 		return &SendChatResult{PaymentRequired: &pr}, nil
 	default:
+		// Best-effort JSON parse: prefer .error from a structured body, fall
+		// back to the raw response text. A non-JSON body is expected here
+		// (e.g., HTML error pages from a misconfigured proxy), so the
+		// unmarshal error is intentionally discarded.
 		var errData map[string]interface{}
-		json.Unmarshal(data, &errData)
+		_ = json.Unmarshal(data, &errData)
 		msg := string(data)
 		if e, ok := errData["error"]; ok {
 			msg = fmt.Sprintf("%v", e)
