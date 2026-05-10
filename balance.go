@@ -12,6 +12,7 @@ type BalanceMonitor struct {
 	pollInterval        time.Duration
 	lowBalanceThreshold *float64
 	onLowBalance        func(float64)
+	onPoll              func(float64)
 
 	mu      sync.Mutex
 	balance *float64
@@ -34,6 +35,14 @@ func NewBalanceMonitor(
 		onLowBalance:        onLowBalance,
 		stopCh:              make(chan struct{}),
 	}
+}
+
+// SetOnPoll registers a callback that fires after each successful balance
+// poll. The callback runs on the monitor's polling goroutine, so it must
+// not block. Call SetOnPoll before [BalanceMonitor.Start]; after Start the
+// callback is read without locking.
+func (m *BalanceMonitor) SetOnPoll(cb func(float64)) {
+	m.onPoll = cb
 }
 
 // Start begins polling in a background goroutine.
@@ -85,14 +94,23 @@ func (m *BalanceMonitor) poll() {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.balance = &balance
+	onPoll := m.onPoll
+	onLow := m.onLowBalance
+	threshold := m.lowBalanceThreshold
+	wasLow := m.wasLow
+	if threshold != nil && onLow != nil {
+		m.wasLow = balance < *threshold
+	}
+	m.mu.Unlock()
 
-	if m.lowBalanceThreshold != nil && m.onLowBalance != nil {
-		isLow := balance < *m.lowBalanceThreshold
-		if isLow && !m.wasLow {
-			m.onLowBalance(balance)
+	if onPoll != nil {
+		onPoll(balance)
+	}
+	if threshold != nil && onLow != nil {
+		isLow := balance < *threshold
+		if isLow && !wasLow {
+			onLow(balance)
 		}
-		m.wasLow = isLow
 	}
 }

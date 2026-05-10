@@ -40,6 +40,12 @@ func NewSessionStore(ttl time.Duration) *SessionStore {
 
 // GetOrCreate returns session info for the given ID, creating a new session if needed.
 // Expired sessions are replaced with fresh ones.
+//
+// GetOrCreate is read-only with respect to request counting: it does not
+// increment requestCount. Counting is the responsibility of
+// [SessionStore.RecordRequest], which is invoked once per successful request
+// from the client. Incrementing here would double-count and trigger the
+// three-strike escalation prematurely.
 func (s *SessionStore) GetOrCreate(sessionID, defaultModel string) SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -56,7 +62,6 @@ func (s *SessionStore) GetOrCreate(sessionID, defaultModel string) SessionInfo {
 		return SessionInfo{Model: defaultModel, Escalated: false}
 	}
 
-	entry.requestCount++
 	return SessionInfo{Model: entry.model, Escalated: entry.escalated}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // validateGatewayURL rejects plaintext http:// gateway URLs unless the host is
@@ -40,7 +41,12 @@ type SolvelaClient struct {
 	cache        *ResponseCache
 	sessionStore *SessionStore
 	sessionSalt  []byte
-	lastBalance  *float64
+
+	balanceMu      sync.RWMutex
+	lastBalance    float64
+	lastBalanceSet bool
+
+	balanceMonitor *BalanceMonitor
 }
 
 // NewClient creates a new SolvelaClient with functional options.
@@ -77,7 +83,42 @@ func NewClient(wallet *Wallet, signer Signer, opts ...Option) (*SolvelaClient, e
 	if cfg.EnableSessions {
 		c.sessionStore = NewSessionStore(cfg.SessionTTL)
 	}
+	// Opt-in: only spin up a background poller when the caller has asked for
+	// one via [WithBalanceMonitor]. Auto-starting would be a surprising RPC
+	// tax for the common case where the free-fallback guard is unused.
+	if cfg.BalancePollInterval > 0 && cfg.BalanceFetcher != nil {
+		monitor := NewBalanceMonitor(cfg.BalanceFetcher, cfg.BalancePollInterval, nil, nil)
+		monitor.SetOnPoll(func(b float64) { c.setLastBalance(b) })
+		c.balanceMonitor = monitor
+		monitor.Start()
+	}
 	return c, nil
+}
+
+// Close releases resources held by the client. It stops the background
+// balance monitor (if one was started via [WithBalanceMonitor]). Safe to
+// call multiple times. After Close the client should not be reused.
+func (c *SolvelaClient) Close() {
+	if c.balanceMonitor != nil {
+		c.balanceMonitor.Stop()
+	}
+}
+
+// setLastBalance stores the latest balance under the balance lock.
+func (c *SolvelaClient) setLastBalance(b float64) {
+	c.balanceMu.Lock()
+	c.lastBalance = b
+	c.lastBalanceSet = true
+	c.balanceMu.Unlock()
+}
+
+// getLastBalance returns the most recent balance and whether one has been
+// recorded. Reads under a shared lock so concurrent Chat / ChatStream calls
+// do not race the BalanceMonitor goroutine.
+func (c *SolvelaClient) getLastBalance() (float64, bool) {
+	c.balanceMu.RLock()
+	defer c.balanceMu.RUnlock()
+	return c.lastBalance, c.lastBalanceSet
 }
 
 // Chat sends a non-streaming chat request with automatic payment, caching,
@@ -86,7 +127,7 @@ func (c *SolvelaClient) Chat(ctx context.Context, request *ChatRequest) (*ChatRe
 	model := request.Model
 
 	// Step 1: Balance guard
-	if c.lastBalance != nil && *c.lastBalance == 0 && c.config.FreeFallbackModel != "" {
+	if balance, ok := c.getLastBalance(); ok && balance == 0 && c.config.FreeFallbackModel != "" {
 		model = c.config.FreeFallbackModel
 	}
 
@@ -174,7 +215,7 @@ func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<
 	model := request.Model
 
 	// Step 1: Balance guard
-	if c.lastBalance != nil && *c.lastBalance == 0 && c.config.FreeFallbackModel != "" {
+	if balance, ok := c.getLastBalance(); ok && balance == 0 && c.config.FreeFallbackModel != "" {
 		model = c.config.FreeFallbackModel
 	}
 
@@ -200,26 +241,60 @@ func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<
 		return nil, err
 	}
 
-	ch, err := c.transport.SendChatStream(ctx, effectiveReq, sig, nil)
+	// Drive the upstream goroutine with a child context so cancellation here
+	// (consumer abandons the stream early) propagates immediately. Without
+	// this the transport goroutine would block forever on `ch <- chunk` once
+	// the consumer stopped reading, leaking a goroutine plus the underlying
+	// HTTP body.
+	streamCtx, cancel := context.WithCancel(ctx)
+	ch, err := c.transport.SendChatStream(streamCtx, effectiveReq, sig, nil)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 
-	// Wrap channel to do session update after stream completes
-	if c.sessionStore != nil && sessionID != "" {
-		wrappedCh := make(chan ChatChunkOrError)
-		go func() {
-			defer close(wrappedCh)
-			for item := range ch {
-				wrappedCh <- item
+	wrappedCh := make(chan ChatChunkOrError)
+	go func() {
+		defer close(wrappedCh)
+		// Cancelling here unblocks the transport goroutine if the consumer
+		// abandons wrappedCh before the stream completes.
+		defer cancel()
+		for {
+			select {
+			case <-ctx.Done():
+				// Consumer's parent context cancelled. Cancel the child to
+				// unblock the upstream goroutine; the deferred cancel above
+				// would also do this, but doing it eagerly avoids holding
+				// onto the body any longer than needed.
+				cancel()
+				// Drain remaining items so the upstream goroutine can return.
+				go func() {
+					for range ch {
+					}
+				}()
+				return
+			case item, ok := <-ch:
+				if !ok {
+					if c.sessionStore != nil && sessionID != "" {
+						hash := CacheKey(model, request.Messages)
+						c.sessionStore.RecordRequest(sessionID, hash)
+					}
+					return
+				}
+				select {
+				case wrappedCh <- item:
+				case <-ctx.Done():
+					cancel()
+					go func() {
+						for range ch {
+						}
+					}()
+					return
+				}
 			}
-			hash := CacheKey(model, request.Messages)
-			c.sessionStore.RecordRequest(sessionID, hash)
-		}()
-		return wrappedCh, nil
-	}
-
-	return ch, nil
+		}
+	}()
+	return wrappedCh, nil
 }
 
 // Models retrieves available models from the gateway.
@@ -227,9 +302,15 @@ func (c *SolvelaClient) Models(ctx context.Context) ([]ModelInfo, error) {
 	return c.transport.FetchModels(ctx)
 }
 
-// LastKnownBalance returns the most recently known wallet balance, or nil.
-func (c *SolvelaClient) LastKnownBalance() *float64 {
-	return c.lastBalance
+// LastKnownBalance returns the most recently known wallet balance and a
+// boolean reporting whether one has been recorded yet. The boolean
+// distinguishes "balance is zero" from "we have not polled yet" — the
+// former triggers the free-fallback-model guard, the latter does not. The
+// background poller configured via [WithBalanceMonitor] is responsible for
+// populating this value; without that option the second return is always
+// false.
+func (c *SolvelaClient) LastKnownBalance() (float64, bool) {
+	return c.getLastBalance()
 }
 
 // String returns a debug-safe representation with redacted secrets.

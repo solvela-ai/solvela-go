@@ -155,3 +155,58 @@ func TestRecordRequestNonexistentSession(t *testing.T) {
 	// Should not panic
 	store.RecordRequest("nonexistent", 12345)
 }
+
+// TestGetOrCreateDoesNotIncrementRequestCount asserts that calling
+// GetOrCreate multiple times does not, by itself, advance the three-strike
+// escalation counter. Counting is RecordRequest's job; previously
+// GetOrCreate double-counted and could trigger escalation prematurely.
+func TestGetOrCreateDoesNotIncrementRequestCount(t *testing.T) {
+	store := NewSessionStore(30 * time.Minute)
+	store.GetOrCreate("sess-1", "gpt-4")
+
+	// Five GetOrCreate calls with the same id should not escalate, because
+	// nothing has been RecordRequest'd yet.
+	for i := 0; i < 5; i++ {
+		info := store.GetOrCreate("sess-1", "gpt-4")
+		if info.Escalated {
+			t.Fatalf("GetOrCreate alone must not escalate (iteration %d)", i)
+		}
+	}
+
+	// Two RecordRequests with the same hash plus more GetOrCreates still
+	// must not escalate — only three RecordRequests do.
+	store.RecordRequest("sess-1", 7)
+	store.RecordRequest("sess-1", 7)
+	for i := 0; i < 3; i++ {
+		info := store.GetOrCreate("sess-1", "gpt-4")
+		if info.Escalated {
+			t.Fatalf("escalation triggered by GetOrCreate after only 2 RecordRequests (iter %d)", i)
+		}
+	}
+
+	// Third RecordRequest crosses the threshold.
+	store.RecordRequest("sess-1", 7)
+	info := store.GetOrCreate("sess-1", "gpt-4")
+	if !info.Escalated {
+		t.Fatal("expected escalation after 3 RecordRequests with same hash")
+	}
+}
+
+// TestGetOrCreateRequestCountFieldIsZero pokes at internals to confirm the
+// per-entry requestCount is not advanced by GetOrCreate.
+func TestGetOrCreateRequestCountFieldIsZero(t *testing.T) {
+	store := NewSessionStore(30 * time.Minute)
+	store.GetOrCreate("sess-1", "gpt-4")
+	for i := 0; i < 4; i++ {
+		store.GetOrCreate("sess-1", "gpt-4")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	entry, ok := store.sessions["sess-1"]
+	if !ok {
+		t.Fatal("session missing")
+	}
+	if entry.requestCount != 0 {
+		t.Errorf("requestCount: got %d, want 0 (GetOrCreate must not increment)", entry.requestCount)
+	}
+}

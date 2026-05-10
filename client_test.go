@@ -3,9 +3,12 @@ package solvela
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -203,16 +206,305 @@ func TestClientLastKnownBalance(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	if client.LastKnownBalance() != nil {
-		t.Error("expected nil balance initially")
+	if _, ok := client.LastKnownBalance(); ok {
+		t.Error("expected unset balance initially")
 	}
 
-	balance := 42.5
-	client.lastBalance = &balance
+	// Drive through the same code path used by the BalanceMonitor callback
+	// so the test exercises the real getter/setter pair, not a direct field
+	// assignment that would tautologically pass.
+	client.setLastBalance(42.5)
 
-	got := client.LastKnownBalance()
-	if got == nil || *got != 42.5 {
+	got, ok := client.LastKnownBalance()
+	if !ok {
+		t.Fatal("expected balance to be set")
+	}
+	if got != 42.5 {
 		t.Errorf("balance: got %v, want 42.5", got)
+	}
+}
+
+// TestChatCallsRecordRequestExactlyOnce asserts that one call to Chat
+// produces exactly one RecordRequest invocation. With the previous bug,
+// GetOrCreate also counted, so three Chat calls escalated immediately;
+// after the fix three Chat calls plus the matching three RecordRequest
+// increments are needed.
+func TestChatCallsRecordRequestExactlyOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:    "chat-1",
+			Model: "gpt-4",
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: "ok"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil,
+		WithGatewayURL(server.URL),
+		WithSessions(true),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	req := &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := client.Chat(context.Background(), req); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+
+	// After 3 Chat calls with identical messages, three RecordRequests
+	// should have fired (one per call). The session is escalated only when
+	// the threshold is crossed by RecordRequest, never by GetOrCreate.
+	sessionID := DeriveSessionIDWithSalt(client.sessionSalt, req.Messages)
+	client.sessionStore.mu.Lock()
+	entry, ok := client.sessionStore.sessions[sessionID]
+	client.sessionStore.mu.Unlock()
+	if !ok {
+		t.Fatal("session not stored")
+	}
+	if got := len(entry.recentHashes); got != 3 {
+		t.Errorf("recentHashes len: got %d, want 3", got)
+	}
+	if !entry.escalated {
+		t.Error("expected escalation after 3 identical RecordRequests")
+	}
+}
+
+// TestChatBalanceGuardSubstitutesFreeModel exercises the wired-up
+// BalanceMonitor path: when the monitor reports a zero balance the next
+// Chat call must substitute the configured free fallback model.
+func TestChatBalanceGuardSubstitutesFreeModel(t *testing.T) {
+	var seenModels []string
+	var modelMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		modelMu.Lock()
+		seenModels = append(seenModels, req.Model)
+		modelMu.Unlock()
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:    "chat-free",
+			Model: req.Model,
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: "ok"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+
+	// Fetcher returns 0.0 — drives the guard.
+	fetcher := func() (float64, error) { return 0.0, nil }
+
+	client, err := NewClient(wallet, nil,
+		WithGatewayURL(server.URL),
+		WithFreeFallbackModel("free-model"),
+		WithBalanceMonitor(20*time.Millisecond, fetcher),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	// Wait for the first poll to land. The monitor polls immediately on
+	// Start, but it runs on a separate goroutine so we need to give it a
+	// moment.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if bal, ok := client.LastKnownBalance(); ok && bal == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if bal, ok := client.LastKnownBalance(); !ok || bal != 0 {
+		t.Fatalf("monitor never reported balance=0 (got=%v ok=%v)", bal, ok)
+	}
+
+	if _, err := client.Chat(context.Background(), &ChatRequest{
+		Model:    "premium-model",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	}); err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+
+	modelMu.Lock()
+	defer modelMu.Unlock()
+	if len(seenModels) != 1 {
+		t.Fatalf("server saw %d requests, want 1: %v", len(seenModels), seenModels)
+	}
+	if seenModels[0] != "free-model" {
+		t.Errorf("balance guard did not substitute free model: server saw %q, want %q", seenModels[0], "free-model")
+	}
+}
+
+// TestChatBalanceGuardDormantWithoutMonitor confirms that without
+// WithBalanceMonitor the guard is dormant and the requested model passes
+// through verbatim, even with a free fallback configured.
+func TestChatBalanceGuardDormantWithoutMonitor(t *testing.T) {
+	var seenModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		seenModel = req.Model
+		json.NewEncoder(w).Encode(ChatResponse{
+			ID:      "x",
+			Model:   req.Model,
+			Choices: []ChatChoice{{Index: 0, Message: ChatMessage{Role: RoleAssistant, Content: "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil,
+		WithGatewayURL(server.URL),
+		WithFreeFallbackModel("free-model"),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	if _, err := client.Chat(context.Background(), &ChatRequest{
+		Model:    "premium-model",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	}); err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	if seenModel != "premium-model" {
+		t.Errorf("expected guard dormant; server saw %q, want %q", seenModel, "premium-model")
+	}
+}
+
+// fakeStreamSigner returns a minimal valid PaymentPayload so ChatStream
+// tests can exercise the streaming path without needing real Solana RPC
+// connectivity. Used to drive the 402 → sign → re-issue handshake.
+type fakeStreamSigner struct{}
+
+func (fakeStreamSigner) SignPayment(_ context.Context, _ uint64, payTo string, resource Resource, accepted PaymentAccept) (*PaymentPayload, error) {
+	return &PaymentPayload{
+		X402Version: X402Version,
+		Resource:    resource,
+		Accepted:    accepted,
+		Payload:     SolanaPayload{Transaction: "fake-tx"},
+	}, nil
+}
+
+// TestChatStreamCancelDoesNotLeakGoroutines exercises the SSE goroutine
+// fix: the consumer cancels the parent context after reading a single
+// chunk and the upstream goroutine plus body must close, not block on a
+// channel send forever.
+//
+// Uses a 402 probe response followed by a successful streaming response so
+// the actual transport.SendChatStream goroutine is the one being tested
+// for cleanup.
+func TestChatStreamCancelDoesNotLeakGoroutines(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		// Non-stream probe: return 402 to force the SDK to sign and re-issue
+		// as a streaming request, so the SSE goroutine fix is actually
+		// exercised.
+		if !req.Stream {
+			pr := PaymentRequired{
+				X402Version:   X402Version,
+				CostBreakdown: CostBreakdown{Total: "100"},
+				Resource:      Resource{URL: serverURL + "/v1/chat/completions", Method: "POST"},
+				Accepts: []PaymentAccept{
+					{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+				},
+			}
+			w.WriteHeader(402)
+			json.NewEncoder(w).Encode(pr)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("ResponseWriter does not support flushing")
+			return
+		}
+		ctx := r.Context()
+		for i := 0; i < 1000; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			content := "x"
+			role := RoleAssistant
+			chunk := ChatChunk{
+				ID:      "chunk",
+				Model:   "gpt-4",
+				Choices: []ChatChunkChoice{{Index: 0, Delta: ChatDelta{Role: &role, Content: &content}}},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, fakeStreamSigner{},
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	// Baseline goroutine count.
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		ch, err := client.ChatStream(ctx, &ChatRequest{
+			Model:    "gpt-4",
+			Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+		})
+		if err != nil {
+			cancel()
+			t.Fatalf("ChatStream: %v", err)
+		}
+		// Read exactly one chunk, then cancel and stop reading.
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("never received first chunk")
+		}
+		cancel()
+	}
+
+	// Allow goroutines to unwind. If the fix is missing, the upstream
+	// goroutines stay parked on `ch <- chunk` forever and the count keeps
+	// climbing.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		if runtime.NumGoroutine() <= baseline+2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	final := runtime.NumGoroutine()
+	if final > baseline+2 {
+		t.Errorf("goroutine leak suspected: baseline=%d, final=%d (5 abandoned streams)", baseline, final)
 	}
 }
 

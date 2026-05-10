@@ -26,6 +26,18 @@ type ClientConfig struct {
 	EnableQualityCheck bool
 	MaxQualityRetries  int
 	FreeFallbackModel  string
+	// BalancePollInterval, when non-zero, instructs [NewClient] to start a
+	// background [BalanceMonitor] that periodically refreshes the client's
+	// last-known wallet balance. The free-fallback-model guard in
+	// [SolvelaClient.Chat] / [SolvelaClient.ChatStream] reads that value to
+	// detect a depleted wallet and substitute [ClientConfig.FreeFallbackModel].
+	// Without a non-zero interval and a [BalanceFetcher], lastBalance is
+	// never populated and the guard is dormant. Set via [WithBalanceMonitor].
+	BalancePollInterval time.Duration
+	// BalanceFetcher returns the wallet's current balance for the background
+	// [BalanceMonitor]. Required when [BalancePollInterval] is non-zero. Set
+	// via [WithBalanceMonitor].
+	BalanceFetcher func() (float64, error)
 }
 
 // DefaultConfig returns a ClientConfig with sensible defaults.
@@ -90,4 +102,24 @@ func WithMaxQualityRetries(n int) Option {
 // WithFreeFallbackModel sets the free model to fall back to.
 func WithFreeFallbackModel(model string) Option {
 	return func(c *ClientConfig) { c.FreeFallbackModel = model }
+}
+
+// WithBalanceMonitor enables a background goroutine that polls the wallet
+// balance every interval using fetcher and feeds the result into the
+// client's last-known balance cache. This is required for the free-fallback
+// model guard configured by [WithFreeFallbackModel] to fire — without a
+// monitor the cache stays empty and the guard is dormant.
+//
+// The monitor is opt-in by design: NewClient does not auto-start network
+// pollers, so callers that do not care about balance-aware fallback pay no
+// background-RPC tax. Call [SolvelaClient.Close] to stop the monitor when
+// the client is no longer needed.
+//
+// interval and fetcher must both be non-zero/non-nil; passing zero or nil
+// is a no-op for safety.
+func WithBalanceMonitor(interval time.Duration, fetcher func() (float64, error)) Option {
+	return func(c *ClientConfig) {
+		c.BalancePollInterval = interval
+		c.BalanceFetcher = fetcher
+	}
 }

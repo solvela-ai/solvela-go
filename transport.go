@@ -165,7 +165,21 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 		// Default scanner token buffer is 64 KB, which can truncate large SSE
 		// chunks containing long completions. Allow up to 1 MB per line.
 		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		// send returns false if the context was cancelled while we waited to
+		// hand off; the caller must then return so the deferred body close
+		// runs and the goroutine exits.
+		send := func(item ChatChunkOrError) bool {
+			select {
+			case ch <- item:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		for scanner.Scan() {
+			if ctx.Err() != nil {
+				return
+			}
 			line := scanner.Text()
 			if strings.HasPrefix(line, "data: ") {
 				dataStr := strings.TrimPrefix(line, "data: ")
@@ -175,16 +189,19 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 				}
 				var chunk ChatChunk
 				if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
-					ch <- ChatChunkOrError{Err: err}
+					send(ChatChunkOrError{Err: err})
 					return
 				}
-				ch <- ChatChunkOrError{Chunk: &chunk}
+				if !send(ChatChunkOrError{Chunk: &chunk}) {
+					return
+				}
 			}
 		}
 		// Surface scanner errors (e.g., connection reset, oversize line) so
-		// truncated streams are not mistaken for clean closes.
-		if err := scanner.Err(); err != nil {
-			ch <- ChatChunkOrError{Err: fmt.Errorf("stream read error: %w", err)}
+		// truncated streams are not mistaken for clean closes. Skip the
+		// error-send if the context is already cancelled (consumer left).
+		if err := scanner.Err(); err != nil && ctx.Err() == nil {
+			send(ChatChunkOrError{Err: fmt.Errorf("stream read error: %w", err)})
 		}
 	}()
 	return ch, nil
