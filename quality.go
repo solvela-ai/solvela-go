@@ -19,7 +19,7 @@ var knownErrorPhrases = []string{
 }
 
 // CheckDegraded checks if response content is degraded.
-// Returns empty string if OK, or a DegradedReason.
+// Returns empty [DegradedReason] if OK, or a specific DegradedReason value.
 func CheckDegraded(content string) DegradedReason {
 	// 1. Empty/whitespace
 	if strings.TrimSpace(content) == "" {

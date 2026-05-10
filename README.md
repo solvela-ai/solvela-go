@@ -83,6 +83,8 @@ client, err := solvela.NewClient(wallet, &MySigner{wallet: wallet}, ...)
 
 ## Configuration
 
+The default per-request payment cap is **10 USDC** (`10_000_000` atomic units). `WithMaxPaymentAmount` is only needed when a caller explicitly requires a higher cap.
+
 ```go
 client, err := solvela.NewClient(wallet, signer,
 	solvela.WithGatewayURL("https://api.solvela.ai"),
@@ -92,7 +94,7 @@ client, err := solvela.NewClient(wallet, signer,
 	solvela.WithQualityCheck(true),
 	solvela.WithMaxQualityRetries(2),
 	solvela.WithExpectedRecipient("expected-wallet-address"),
-	solvela.WithMaxPaymentAmount(100_000_000), // atomic USDC units (100 USDC)
+	solvela.WithMaxPaymentAmount(10_000_000), // atomic USDC units (10 USDC; the default cap)
 	solvela.WithFreeFallbackModel("gpt-4o-mini"),
 )
 if err != nil {
