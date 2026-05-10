@@ -192,21 +192,3 @@ func TestGetOrCreateDoesNotIncrementRequestCount(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateRequestCountFieldIsZero pokes at internals to confirm the
-// per-entry requestCount is not advanced by GetOrCreate.
-func TestGetOrCreateRequestCountFieldIsZero(t *testing.T) {
-	store := NewSessionStore(30 * time.Minute)
-	store.GetOrCreate("sess-1", "gpt-4")
-	for i := 0; i < 4; i++ {
-		store.GetOrCreate("sess-1", "gpt-4")
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	entry, ok := store.sessions["sess-1"]
-	if !ok {
-		t.Fatal("session missing")
-	}
-	if entry.requestCount != 0 {
-		t.Errorf("requestCount: got %d, want 0 (GetOrCreate must not increment)", entry.requestCount)
-	}
-}
