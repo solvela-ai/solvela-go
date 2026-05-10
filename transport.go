@@ -138,14 +138,22 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 
 	if resp.StatusCode == 402 {
 		defer resp.Body.Close()
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		if readErr != nil {
+			return nil, &GatewayError{Status: 402, Message: fmt.Sprintf("read 402 body: %v", readErr)}
+		}
 		var pr PaymentRequired
-		json.Unmarshal(data, &pr)
+		if err := json.Unmarshal(data, &pr); err != nil {
+			return nil, &GatewayError{Status: 402, Message: fmt.Sprintf("parse 402 body: %v", err)}
+		}
 		return nil, &PaymentRequiredError{PaymentRequired: pr}
 	}
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		if readErr != nil {
+			return nil, &GatewayError{Status: resp.StatusCode, Message: fmt.Sprintf("read error body: %v", readErr)}
+		}
 		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
 	}
 
@@ -172,6 +180,11 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 				}
 				ch <- ChatChunkOrError{Chunk: &chunk}
 			}
+		}
+		// Surface scanner errors (e.g., connection reset, oversize line) so
+		// truncated streams are not mistaken for clean closes.
+		if err := scanner.Err(); err != nil {
+			ch <- ChatChunkOrError{Err: fmt.Errorf("stream read error: %w", err)}
 		}
 	}()
 	return ch, nil

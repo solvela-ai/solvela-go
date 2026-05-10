@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // validateGatewayURL rejects plaintext http:// gateway URLs unless the host is
@@ -300,8 +302,14 @@ func (c *SolvelaClient) signPaymentRequired(ctx context.Context, pr *PaymentRequ
 	if err := c.validatePayment(accepted); err != nil {
 		return "", err
 	}
+	if err := c.validateResourceOrigin(pr.Resource.URL); err != nil {
+		return "", err
+	}
 
-	amountAtomic := parseAmount(accepted.Amount)
+	amountAtomic, err := parseAmount(accepted.Amount)
+	if err != nil {
+		return "", err
+	}
 	payload, err := c.signer.SignPayment(ctx, amountAtomic, accepted.PayTo, pr.Resource, *accepted)
 	if err != nil {
 		return "", err
@@ -340,6 +348,33 @@ func (c *SolvelaClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept
 	return nil
 }
 
+// validateResourceOrigin rejects a 402 Resource.URL whose origin (scheme+host)
+// does not match the configured gateway. The Resource.URL is server-supplied
+// and may be embedded into the signed payment payload (e.g., as a memo field),
+// so we cannot let a rogue gateway substitute a foreign URL and trick the
+// signer into binding payment metadata to an unintended endpoint.
+//
+// An empty Resource.URL is permitted: not every gateway populates it, and
+// rejecting on absence would break legitimate flows. Only mismatches are
+// fatal.
+func (c *SolvelaClient) validateResourceOrigin(resourceURL string) error {
+	if resourceURL == "" {
+		return nil
+	}
+	ru, err := url.Parse(resourceURL)
+	if err != nil {
+		return &ClientError{Message: fmt.Sprintf("invalid resource URL %q: %v", resourceURL, err)}
+	}
+	gu, err := url.Parse(c.config.GatewayURL)
+	if err != nil {
+		return &ClientError{Message: fmt.Sprintf("invalid gateway URL %q: %v", c.config.GatewayURL, err)}
+	}
+	if ru.Scheme != gu.Scheme || ru.Host != gu.Host {
+		return &ClientError{Message: fmt.Sprintf("resource URL origin does not match configured gateway: resource=%s://%s gateway=%s://%s", ru.Scheme, ru.Host, gu.Scheme, gu.Host)}
+	}
+	return nil
+}
+
 func (c *SolvelaClient) validatePayment(accepted *PaymentAccept) error {
 	if c.config.ExpectedRecipient != "" && accepted.PayTo != c.config.ExpectedRecipient {
 		return &RecipientMismatchError{Expected: c.config.ExpectedRecipient, Actual: accepted.PayTo}
@@ -358,15 +393,31 @@ func (c *SolvelaClient) validatePayment(accepted *PaymentAccept) error {
 	if c.config.MaxPaymentAmount == nil {
 		return &ClientError{Message: "client misconfigured: MaxPaymentAmount must be set (use WithMaxPaymentAmount or DefaultConfig)"}
 	}
-	amount := parseAmount(accepted.Amount)
+	amount, err := parseAmount(accepted.Amount)
+	if err != nil {
+		return err
+	}
 	if amount > *c.config.MaxPaymentAmount {
 		return &AmountExceedsMaxError{Amount: amount, MaxAmount: *c.config.MaxPaymentAmount}
 	}
 	return nil
 }
 
-func parseAmount(s string) uint64 {
-	var n uint64
-	fmt.Sscanf(s, "%d", &n)
-	return n
+// parseAmount parses a 402-supplied atomic-units amount string. It rejects
+// empty, non-numeric, overflowing, and zero values. Zero is rejected because
+// no legitimate 402 says "pay zero", and silently treating bad input as zero
+// would let a malicious gateway slip past the MaxPaymentAmount cap.
+func parseAmount(s string) (uint64, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return 0, &ClientError{Message: fmt.Sprintf("invalid payment amount %q: empty", s)}
+	}
+	n, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil {
+		return 0, &ClientError{Message: fmt.Sprintf("invalid payment amount %q: %v", s, err)}
+	}
+	if n == 0 {
+		return 0, &ClientError{Message: fmt.Sprintf("invalid payment amount %q: must be greater than zero", s)}
+	}
+	return n, nil
 }

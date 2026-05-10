@@ -342,18 +342,211 @@ func TestClientAmountExceedsMax(t *testing.T) {
 
 func TestParseAmount(t *testing.T) {
 	tests := []struct {
-		input string
-		want  uint64
+		name    string
+		input   string
+		want    uint64
+		wantErr bool
 	}{
-		{"1000", 1000},
-		{"0", 0},
-		{"999999", 999999},
-		{"", 0},
+		{name: "valid", input: "1000", want: 1000, wantErr: false},
+		{name: "valid_large", input: "999999", want: 999999, wantErr: false},
+		{name: "valid_with_whitespace", input: " 42 ", want: 42, wantErr: false},
+		{name: "zero_rejected", input: "0", wantErr: true},
+		{name: "empty_rejected", input: "", wantErr: true},
+		{name: "whitespace_only_rejected", input: "   ", wantErr: true},
+		{name: "non_numeric_rejected", input: "abc", wantErr: true},
+		{name: "negative_rejected", input: "-1", wantErr: true},
+		{name: "decimal_rejected", input: "1.5", wantErr: true},
+		{name: "overflow_rejected", input: "99999999999999999999999999", wantErr: true},
+		{name: "trailing_garbage_rejected", input: "100abc", wantErr: true},
 	}
 	for _, tt := range tests {
-		got := parseAmount(tt.input)
-		if got != tt.want {
-			t.Errorf("parseAmount(%q): got %d, want %d", tt.input, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseAmount(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseAmount(%q): expected error, got %d", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseAmount(%q): unexpected error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseAmount(%q): got %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClientRejectsZeroAmountAttack verifies that a malicious gateway
+// returning amount="0" is rejected during validation rather than passing
+// through to the signer with a zero amount.
+func TestClientRejectsZeroAmountAttack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "0"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "0", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for zero-amount payment")
+	}
+	ce, ok := err.(*ClientError)
+	if !ok {
+		t.Fatalf("expected ClientError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ce.Message, "invalid payment amount") {
+		t.Errorf("unexpected ClientError message: %q", ce.Message)
+	}
+}
+
+// TestClientRejectsNonNumericAmount verifies that non-numeric amounts are
+// rejected — previously fmt.Sscanf would treat them as zero and silently
+// pass the cap check.
+func TestClientRejectsNonNumericAmount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "junk"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "notanumber", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for non-numeric amount")
+	}
+	if _, ok := err.(*ClientError); !ok {
+		t.Fatalf("expected ClientError, got %T: %v", err, err)
+	}
+}
+
+// TestClientRejectsForeignResourceURL verifies the SDK refuses to sign a
+// payment when the 402 Resource.URL points at an origin different from the
+// configured gateway. A rogue gateway must not be able to bind a foreign URL
+// into the signed payment metadata.
+func TestClientRejectsForeignResourceURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "100"},
+			Resource:      Resource{URL: "https://attacker.example.com/v1/chat/completions", Method: "POST"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for foreign resource URL")
+	}
+	ce, ok := err.(*ClientError)
+	if !ok {
+		t.Fatalf("expected ClientError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ce.Message, "resource URL origin does not match") {
+		t.Errorf("unexpected ClientError message: %q", ce.Message)
+	}
+}
+
+// TestClientAllowsMatchingResourceURL verifies the origin check passes when
+// the Resource.URL matches the configured gateway origin.
+func TestClientAllowsMatchingResourceURL(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "100"},
+			Resource:      Resource{URL: serverURL + "/v1/chat/completions", Method: "POST"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	// We expect this path to pass the origin check and reach SignPayment
+	// (which the stub signer may fail). Either way, we must NOT see a
+	// "resource URL origin does not match" ClientError — that would mean
+	// the origin check rejected a legitimate matching URL.
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err != nil {
+		if ce, ok := err.(*ClientError); ok {
+			if strings.Contains(ce.Message, "resource URL origin does not match") {
+				t.Fatalf("origin check incorrectly rejected matching URL: %v", err)
+			}
 		}
 	}
 }
