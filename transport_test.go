@@ -271,11 +271,11 @@ func TestTransportFetchModels500(t *testing.T) {
 }
 
 // TestTransportFetchModels500BodyCapped sends an error body larger than
-// maxResponseBytes and verifies the LimitReader ceiling holds, so a
+// maxErrorBodyBytes and verifies the LimitReader ceiling holds, so a
 // misbehaving gateway cannot force an unbounded GatewayError.Message
 // allocation. Locks the cap as a regression-prevention invariant.
 func TestTransportFetchModels500BodyCapped(t *testing.T) {
-	oversized := bytes.Repeat([]byte("A"), maxResponseBytes+1024)
+	oversized := bytes.Repeat([]byte("A"), maxErrorBodyBytes+1024)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		_, _ = w.Write(oversized)
@@ -291,8 +291,8 @@ func TestTransportFetchModels500BodyCapped(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected GatewayError, got %T", err)
 	}
-	if len(gatewayErr.Message) > maxResponseBytes {
-		t.Errorf("message length: got %d, want <= %d (LimitReader cap)", len(gatewayErr.Message), maxResponseBytes)
+	if len(gatewayErr.Message) > maxErrorBodyBytes {
+		t.Errorf("message length: got %d, want <= %d (LimitReader cap)", len(gatewayErr.Message), maxErrorBodyBytes)
 	}
 }
 

@@ -13,8 +13,17 @@ import (
 )
 
 // maxResponseBytes caps the response body size to 10 MB to prevent memory
-// exhaustion from a malicious or misbehaving gateway.
+// exhaustion from a malicious or misbehaving gateway. Used on success paths
+// (chat completions, model lists) where a legitimate body can be large.
 const maxResponseBytes = 10 << 20 // 10 MB
+
+// maxErrorBodyBytes caps the response body size for pure error paths where
+// the body is destined for a GatewayError.Message string. 4 KB is plenty for
+// any human-readable diagnostic (rate-limit text, auth failure, HTML title)
+// and prevents a misbehaving gateway from forcing a multi-MB error string
+// into memory and logs. Applied where we know the body cannot be a
+// legitimate large success payload.
+const maxErrorBodyBytes = 4 << 10 // 4 KB
 
 // Transport handles HTTP communication with the Solvela gateway.
 type Transport struct {
@@ -154,7 +163,7 @@ func (t *Transport) SendChatStream(ctx context.Context, request *ChatRequest, pa
 	}
 	if resp.StatusCode != 200 {
 		defer resp.Body.Close()
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if readErr != nil {
 			return nil, &GatewayError{Status: resp.StatusCode, Message: fmt.Sprintf("read error body: %v", readErr)}
 		}
@@ -229,7 +238,7 @@ func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
 		// a bare status code. Mirror SendChatStream's non-200 branch: if the
 		// body read itself fails (connection reset, timeout mid-drain), report
 		// that explicitly rather than producing an empty Message.
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if readErr != nil {
 			return nil, &GatewayError{Status: resp.StatusCode, Message: fmt.Sprintf("read error body: %v", readErr)}
 		}
