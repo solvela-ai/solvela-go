@@ -224,7 +224,11 @@ func (t *Transport) FetchModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, &GatewayError{Status: resp.StatusCode}
+		// Surface the response body so callers can diagnose an upstream
+		// failure (rate-limit message, auth error, etc.) instead of seeing
+		// a bare status code.
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		return nil, &GatewayError{Status: resp.StatusCode, Message: string(data)}
 	}
 	var result struct {
 		Data []ModelInfo `json:"data"`

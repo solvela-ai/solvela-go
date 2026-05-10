@@ -248,6 +248,7 @@ func TestTransportFetchModels(t *testing.T) {
 func TestTransportFetchModels500(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
 	}))
 	defer server.Close()
 
@@ -262,6 +263,10 @@ func TestTransportFetchModels500(t *testing.T) {
 	}
 	if gatewayErr.Status != 500 {
 		t.Errorf("status: got %d, want 500", gatewayErr.Status)
+	}
+	// The body must be surfaced so callers can diagnose upstream failures.
+	if !strings.Contains(gatewayErr.Message, "internal server error") {
+		t.Errorf("message: got %q, want substring %q", gatewayErr.Message, "internal server error")
 	}
 }
 
