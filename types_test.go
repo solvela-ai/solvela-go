@@ -190,59 +190,143 @@ func TestPaymentAcceptOmitEscrowProgramID(t *testing.T) {
 }
 
 func TestModelInfoRoundtrip(t *testing.T) {
-	maxOut := 4096
 	mi := ModelInfo{
-		ID:                       "openai/gpt-4",
-		Provider:                 "openai",
-		ModelID:                  "gpt-4",
-		DisplayName:              "GPT-4",
-		InputCostPerMillion:      30.0,
-		OutputCostPerMillion:     60.0,
-		ContextWindow:            128000,
-		SupportsStreaming:        true,
-		SupportsTools:            true,
-		SupportsVision:           true,
-		Reasoning:                false,
-		SupportsStructuredOutput: true,
-		SupportsBatch:            false,
-		MaxOutputTokens:          &maxOut,
+		ID:                   "openai/gpt-4",
+		Provider:             "openai",
+		DisplayName:          "GPT-4",
+		ContextWindow:        128000,
+		SupportsStreaming:    true,
+		SupportsTools:        true,
+		SupportsVision:       true,
+		Reasoning:            false,
+		InputUsdcPerMillion:  30.0,
+		OutputUsdcPerMillion: 60.0,
+		Currency:             "USDC",
+		FeePercent:           5,
 	}
 
 	data, err := json.Marshal(mi)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+
+	// MarshalJSON must emit the nested gateway wire shape — flat top-level
+	// pricing/capability fields would silently regress to the pre-fix layout.
+	wire := string(data)
+	for _, want := range []string{
+		`"capabilities":`,
+		`"streaming":true`,
+		`"pricing":`,
+		`"input_per_million":30`,
+		`"fee_percent":5`,
+	} {
+		if !contains(wire, want) {
+			t.Errorf("wire missing %q: %s", want, wire)
+		}
 	}
 
 	var decoded ModelInfo
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-
-	if decoded.ID != mi.ID {
-		t.Errorf("id: got %q, want %q", decoded.ID, mi.ID)
-	}
-	if decoded.InputCostPerMillion != 30.0 {
-		t.Errorf("input cost: got %f, want 30.0", decoded.InputCostPerMillion)
-	}
-	if decoded.MaxOutputTokens == nil || *decoded.MaxOutputTokens != 4096 {
-		t.Errorf("max output tokens: got %v, want 4096", decoded.MaxOutputTokens)
+	if decoded != mi {
+		t.Errorf("roundtrip mismatch:\n got  %+v\n want %+v", decoded, mi)
 	}
 }
 
-func TestModelInfoOmitMaxOutputTokens(t *testing.T) {
-	mi := ModelInfo{
-		ID:       "test",
-		Provider: "test",
-		ModelID:  "test",
+// TestModelInfoFromNestedWire locks the canonical gateway shape: a raw JSON
+// payload with `capabilities` + `pricing` nested objects must decode into the
+// flat struct. Regression guard for the pre-fix drift where every model
+// parsed to all-zero pricing / all-false capabilities.
+func TestModelInfoFromNestedWire(t *testing.T) {
+	raw := []byte(`{
+		"id": "deepseek/deepseek-chat",
+		"object": "model",
+		"provider": "deepseek",
+		"display_name": "DeepSeek Chat",
+		"context_window": 64000,
+		"capabilities": {"streaming": true, "tools": true, "vision": false, "reasoning": false},
+		"pricing": {"input_per_million": 0.28, "output_per_million": 1.10, "currency": "USDC", "fee_percent": 5}
+	}`)
+	var mi ModelInfo
+	if err := json.Unmarshal(raw, &mi); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	data, err := json.Marshal(mi)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	if !mi.SupportsStreaming {
+		t.Error("expected supports_streaming=true from nested capabilities")
 	}
+	if mi.InputUsdcPerMillion != 0.28 {
+		t.Errorf("input usdc/M: got %v, want 0.28", mi.InputUsdcPerMillion)
+	}
+	if mi.OutputUsdcPerMillion != 1.10 {
+		t.Errorf("output usdc/M: got %v, want 1.10", mi.OutputUsdcPerMillion)
+	}
+	if mi.ContextWindow != 64000 {
+		t.Errorf("context window: got %d, want 64000", mi.ContextWindow)
+	}
+}
 
-	if contains(string(data), `"max_output_tokens"`) {
-		t.Error("expected max_output_tokens to be omitted when nil")
+// TestModelInfoDefaults verifies that omitted pricing.currency/fee_percent
+// fall back to USDC/5, matching Python's `pricing.get("currency", "USDC")`
+// and `pricing.get("fee_percent", 5)` defaults.
+func TestModelInfoDefaults(t *testing.T) {
+	raw := []byte(`{
+		"id": "free-model",
+		"provider": "p",
+		"display_name": "Free",
+		"context_window": 8000,
+		"capabilities": {},
+		"pricing": {"input_per_million": 0, "output_per_million": 0}
+	}`)
+	var mi ModelInfo
+	if err := json.Unmarshal(raw, &mi); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if mi.Currency != "USDC" {
+		t.Errorf("currency default: got %q, want %q", mi.Currency, "USDC")
+	}
+	if mi.FeePercent != 5 {
+		t.Errorf("fee_percent default: got %d, want 5", mi.FeePercent)
+	}
+}
+
+// TestPaymentAcceptUnknownScheme guards the Scheme-literal validation: a
+// gateway response with an unknown scheme must surface as a typed ClientError
+// at decode time, not silently fall through to "no compatible scheme" later.
+// Mirrors solvela-python tests/unit/security_validation.test and TS
+// tests/unit/security_validation.test.
+func TestPaymentAcceptUnknownScheme(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"unknown scheme", `{"scheme":"future-scheme","network":"x","amount":"1","asset":"x","pay_to":"x","max_timeout_seconds":1}`},
+		{"empty scheme", `{"scheme":"","network":"x","amount":"1","asset":"x","pay_to":"x","max_timeout_seconds":1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var pa PaymentAccept
+			err := json.Unmarshal([]byte(tc.raw), &pa)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if _, ok := err.(*ClientError); !ok {
+				t.Fatalf("expected *ClientError, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestPaymentAcceptKnownSchemes(t *testing.T) {
+	for _, scheme := range []string{"exact", "escrow"} {
+		raw := []byte(`{"scheme":"` + scheme + `","network":"x","amount":"1","asset":"x","pay_to":"x","max_timeout_seconds":1}`)
+		var pa PaymentAccept
+		if err := json.Unmarshal(raw, &pa); err != nil {
+			t.Fatalf("scheme %q: unexpected error: %v", scheme, err)
+		}
+		if string(pa.Scheme) != scheme {
+			t.Errorf("scheme: got %q, want %q", pa.Scheme, scheme)
+		}
 	}
 }
 

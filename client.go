@@ -491,18 +491,18 @@ func (c *SolvelaClient) signPaymentRequired(ctx context.Context, pr *PaymentRequ
 // Asset and network must be validated here to prevent a malicious gateway from
 // tricking the SDK into signing a transfer of a different token, or paying on
 // a different chain.
-func isCompatibleAccept(a PaymentAccept, scheme string) bool {
+func isCompatibleAccept(a PaymentAccept, scheme Scheme) bool {
 	return a.Scheme == scheme && a.Network == SolanaNetwork && a.Asset == USDCMint
 }
 
 func (c *SolvelaClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept {
 	for i := range pr.Accepts {
-		if isCompatibleAccept(pr.Accepts[i], "exact") {
+		if isCompatibleAccept(pr.Accepts[i], SchemeExact) {
 			return &pr.Accepts[i]
 		}
 	}
 	for i := range pr.Accepts {
-		if isCompatibleAccept(pr.Accepts[i], "escrow") {
+		if isCompatibleAccept(pr.Accepts[i], SchemeEscrow) {
 			return &pr.Accepts[i]
 		}
 	}

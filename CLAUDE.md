@@ -10,6 +10,11 @@ go test ./... -cover               # Run tests with coverage summary
 go test ./... -tags=live           # Run live tests (requires running gateway)
 go vet ./...                       # Static analysis
 go fmt ./...                       # Format all files
+
+# Manual smoke test against a live gateway (catches wire-format drift the
+# unit/integration tests can't). Mirrors solvela-python scripts/smoke.py and
+# solvela-ts scripts/smoke.ts. Defaults to http://localhost:8402.
+SOLVELA_GATEWAY_URL=https://staging.solvela.ai go run ./scripts/smoke
 ```
 
 Single-file test example:
