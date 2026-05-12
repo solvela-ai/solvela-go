@@ -1,5 +1,10 @@
 package solvela
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Role represents a chat message role.
 type Role string
 
@@ -125,15 +130,57 @@ type Resource struct {
 	Method string `json:"method"`
 }
 
+// Scheme is the x402 payment scheme. Mirrors Python's
+// `Scheme = Literal["exact", "escrow"]` + `_KNOWN_SCHEMES` guard: a gateway
+// response carrying an unknown scheme is rejected at parse time rather than
+// silently mis-branching at scheme-matching time.
+type Scheme string
+
+const (
+	SchemeExact  Scheme = "exact"
+	SchemeEscrow Scheme = "escrow"
+)
+
+// parseScheme validates a wire scheme string and returns the typed value.
+// An unknown scheme is a wire-format failure, surfaced as a typed ClientError
+// so callers can distinguish "gateway refused" from "gateway speaks a dialect
+// we don't understand."
+func parseScheme(raw string) (Scheme, error) {
+	switch Scheme(raw) {
+	case SchemeExact, SchemeEscrow:
+		return Scheme(raw), nil
+	}
+	return "", &ClientError{Message: fmt.Sprintf("unknown payment scheme: %q", raw)}
+}
+
 // PaymentAccept describes an accepted payment scheme.
 type PaymentAccept struct {
-	Scheme            string  `json:"scheme"`
+	Scheme            Scheme  `json:"scheme"`
 	Network           string  `json:"network"`
 	Amount            string  `json:"amount"`
 	Asset             string  `json:"asset"`
 	PayTo             string  `json:"pay_to"`
 	MaxTimeoutSeconds int     `json:"max_timeout_seconds"`
 	EscrowProgramID   *string `json:"escrow_program_id,omitempty"`
+}
+
+// UnmarshalJSON decodes a PaymentAccept and rejects unknown schemes at the
+// wire boundary. See parseScheme for rationale.
+func (p *PaymentAccept) UnmarshalJSON(data []byte) error {
+	type alias PaymentAccept
+	aux := &struct {
+		Scheme string `json:"scheme"`
+		*alias
+	}{alias: (*alias)(p)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	s, err := parseScheme(aux.Scheme)
+	if err != nil {
+		return err
+	}
+	p.Scheme = s
+	return nil
 }
 
 // PaymentRequired represents a 402 Payment Required response.
@@ -174,20 +221,104 @@ type PaymentPayload struct {
 	Payload     interface{}   `json:"payload"`
 }
 
-// ModelInfo describes a model available on the gateway.
+// ModelInfo describes a model available on the gateway's GET /v1/models
+// registry.
+//
+// The wire format nests capabilities under `capabilities: {...}` and pricing
+// under `pricing: {...}`; the struct flattens those so internal code stays
+// terse. Pricing values are USDC per million tokens as floats (e.g. 0.28 for
+// DeepSeek's input rate), NOT atomic units — convert at the boundary if you
+// need atomic units.
+//
+// Mirrors Python's ModelInfo dataclass (the cross-SDK canonical) and TS's
+// post-rewrite layout. Pre-fix flat fields silently parsed every value as
+// zero/false; see commit history for the regression.
 type ModelInfo struct {
-	ID                       string  `json:"id"`
-	Provider                 string  `json:"provider"`
-	ModelID                  string  `json:"model_id"`
-	DisplayName              string  `json:"display_name"`
-	InputCostPerMillion      float64 `json:"input_cost_per_million"`
-	OutputCostPerMillion     float64 `json:"output_cost_per_million"`
-	ContextWindow            int     `json:"context_window"`
-	SupportsStreaming        bool    `json:"supports_streaming"`
-	SupportsTools            bool    `json:"supports_tools"`
-	SupportsVision           bool    `json:"supports_vision"`
-	Reasoning                bool    `json:"reasoning"`
-	SupportsStructuredOutput bool    `json:"supports_structured_output"`
-	SupportsBatch            bool    `json:"supports_batch"`
-	MaxOutputTokens          *int    `json:"max_output_tokens,omitempty"`
+	ID                   string
+	Provider             string
+	DisplayName          string
+	ContextWindow        int
+	SupportsStreaming    bool
+	SupportsTools        bool
+	SupportsVision       bool
+	Reasoning            bool
+	InputUsdcPerMillion  float64
+	OutputUsdcPerMillion float64
+	Currency             string
+	FeePercent           int
+}
+
+type modelInfoWire struct {
+	ID            string `json:"id"`
+	Object        string `json:"object,omitempty"`
+	Provider      string `json:"provider"`
+	DisplayName   string `json:"display_name"`
+	ContextWindow int    `json:"context_window"`
+	Capabilities  struct {
+		Streaming bool `json:"streaming"`
+		Tools     bool `json:"tools"`
+		Vision    bool `json:"vision"`
+		Reasoning bool `json:"reasoning"`
+	} `json:"capabilities"`
+	Pricing struct {
+		InputPerMillion  float64 `json:"input_per_million"`
+		OutputPerMillion float64 `json:"output_per_million"`
+		Currency         *string `json:"currency,omitempty"`
+		FeePercent       *int    `json:"fee_percent,omitempty"`
+	} `json:"pricing"`
+}
+
+// MarshalJSON emits the nested gateway wire shape.
+func (m ModelInfo) MarshalJSON() ([]byte, error) {
+	w := modelInfoWire{
+		ID:            m.ID,
+		Object:        "model",
+		Provider:      m.Provider,
+		DisplayName:   m.DisplayName,
+		ContextWindow: m.ContextWindow,
+	}
+	w.Capabilities.Streaming = m.SupportsStreaming
+	w.Capabilities.Tools = m.SupportsTools
+	w.Capabilities.Vision = m.SupportsVision
+	w.Capabilities.Reasoning = m.Reasoning
+	w.Pricing.InputPerMillion = m.InputUsdcPerMillion
+	w.Pricing.OutputPerMillion = m.OutputUsdcPerMillion
+	currency := m.Currency
+	if currency == "" {
+		currency = "USDC"
+	}
+	w.Pricing.Currency = &currency
+	feePercent := m.FeePercent
+	w.Pricing.FeePercent = &feePercent
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON decodes the nested gateway wire shape, defaulting currency to
+// "USDC" and fee_percent to 5 when the gateway omits them (matches Python).
+func (m *ModelInfo) UnmarshalJSON(data []byte) error {
+	var w modelInfoWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	m.ID = w.ID
+	m.Provider = w.Provider
+	m.DisplayName = w.DisplayName
+	m.ContextWindow = w.ContextWindow
+	m.SupportsStreaming = w.Capabilities.Streaming
+	m.SupportsTools = w.Capabilities.Tools
+	m.SupportsVision = w.Capabilities.Vision
+	m.Reasoning = w.Capabilities.Reasoning
+	m.InputUsdcPerMillion = w.Pricing.InputPerMillion
+	m.OutputUsdcPerMillion = w.Pricing.OutputPerMillion
+	if w.Pricing.Currency != nil {
+		m.Currency = *w.Pricing.Currency
+	} else {
+		m.Currency = "USDC"
+	}
+	if w.Pricing.FeePercent != nil {
+		m.FeePercent = *w.Pricing.FeePercent
+	} else {
+		m.FeePercent = 5
+	}
+	return nil
 }
