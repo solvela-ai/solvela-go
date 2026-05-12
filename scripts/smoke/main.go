@@ -23,9 +23,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 
 	solvela "github.com/solvela-ai/solvela-go"
 )
+
+// solanaPubkeyRE matches Solana base58 pubkeys (32–44 chars over the Bitcoin
+// base58 alphabet; no 0/O/I/l). An empty or malformed PayTo would route
+// signed funds to address-zero — the most expensive class of silent drift.
+var solanaPubkeyRE = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
+
+// amountRE matches positive decimal-integer strings (no leading sign, no
+// decimals, no scientific notation).
+var amountRE = regexp.MustCompile(`^\d+$`)
 
 func main() {
 	os.Exit(run())
@@ -119,6 +130,57 @@ func run() int {
 		return 1
 	}
 
+	// Critical drift checks — a silent regression in any of these would
+	// route real funds wrong. All six are derivable from the unsigned 402
+	// we just received, so no extra gateway round-trip is required.
+	accept := pr.Accepts[0]
+	if accept.PayTo == "" || !solanaPubkeyRE.MatchString(accept.PayTo) {
+		fmt.Printf("FAIL: accepts[0].PayTo invalid: %q\n", truncate(accept.PayTo, 64))
+		return 1
+	}
+	if !amountRE.MatchString(accept.Amount) {
+		fmt.Printf("FAIL: accepts[0].Amount must be a positive decimal-integer string: %q\n",
+			truncate(accept.Amount, 32))
+		return 1
+	}
+	amt, err := strconv.ParseUint(accept.Amount, 10, 64)
+	if err != nil || amt == 0 {
+		fmt.Printf("FAIL: accepts[0].Amount must parse as a positive uint: %q\n",
+			truncate(accept.Amount, 32))
+		return 1
+	}
+	if accept.Network != solvela.SolanaNetwork {
+		fmt.Printf("FAIL: accepts[0].Network=%q (expected %q)\n",
+			accept.Network, solvela.SolanaNetwork)
+		return 1
+	}
+	if accept.Asset != solvela.USDCMint {
+		fmt.Printf("FAIL: accepts[0].Asset=%q (expected %q)\n",
+			accept.Asset, solvela.USDCMint)
+		return 1
+	}
+	if pr.CostBreakdown.Currency != "USDC" {
+		fmt.Printf("FAIL: cost_breakdown.currency=%q (expected %q)\n",
+			pr.CostBreakdown.Currency, "USDC")
+		return 1
+	}
+	if pr.X402Version != solvela.X402Version {
+		fmt.Printf("FAIL: x402_version=%d (SDK expects %d)\n",
+			pr.X402Version, solvela.X402Version)
+		return 1
+	}
+	fmt.Printf("  critical checks    -> PayTo OK Amount OK Network OK Asset OK Currency OK x402_version=%d OK\n",
+		solvela.X402Version)
+
 	fmt.Println("\nSmoke test PASSED")
 	return 0
+}
+
+// truncate returns s clipped to at most n runes, used only for printing
+// invalid wire fields without flooding stderr on garbage input.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
