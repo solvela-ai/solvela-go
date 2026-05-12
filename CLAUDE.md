@@ -59,4 +59,4 @@ Single-package Go SDK (`package solvela`) — no sub-packages. Module: `github.c
 
 ## CI
 
-GitHub Actions runs `go test` and `go vet` across Go 1.21, 1.22, 1.23 (see `.github/workflows/ci.yml`).
+GitHub Actions runs `go test` and `go vet` on Go 1.23 (see `.github/workflows/ci.yml`).
